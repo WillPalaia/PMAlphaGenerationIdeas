@@ -24,6 +24,43 @@ no orders:
 python run_kalshi_paper.py KX-MARKET-TICKER --db data\market_data.sqlite
 ```
 
+To refresh the tracked universe from newly opened ordinary binary markets:
+
+```powershell
+python run_kalshi_paper.py KX-MARKET-TICKER --discover --db data\market_data.sqlite
+```
+
+The discovery mode is still public-data paper capture. It does not identify
+whether a Kalshi contract is legally identical to a sportsbook line; that
+requires an authorized reference feed and manual contract-rule verification.
+
+## External-reference market-making research
+
+Reference prices must be exported from an authorized sportsbook or venue feed
+after removing vig and checking settlement rules. Use one CSV row per update:
+
+```text
+timestamp_ms,market_id,fair_probability,source
+1760000000000,KX-MARKET-TICKER,0.57,authorized_feed
+```
+
+Run the conservative quote simulation against captured Kalshi snapshots:
+
+```powershell
+python run_market_maker_backtest.py `
+  --snapshots data\kalshi.csv `
+  --references data\references.csv `
+  --half-spread 0.03 `
+  --max-inventory 5 `
+  --fee-rate 0.01 `
+  --adverse-selection-bps 5
+```
+
+This simulator only fills when the observed book crosses the quote. It does
+not assume queue priority, guaranteed fills, or that similar contract titles
+have identical settlement rules. Positive results from synthetic candles or
+unverified line matches are not evidence of a live edge.
+
 This is a data-capture and paper-trading primitive, not evidence of
 profitability. A strategy must pass realistic fee, fill, latency, out-of-sample,
 and forward paper-trading gates before any live adapter is considered.

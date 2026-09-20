@@ -16,6 +16,14 @@ class SnapshotSource(Protocol):
         """Fetch the latest normalized snapshots without placing orders."""
 
 
+class DynamicSnapshotSource(Protocol):
+    async def refresh(self) -> None:
+        ...
+
+    async def snapshots(self) -> list[MarketSnapshot]:
+        ...
+
+
 class PaperStrategy(Protocol):
     def on_snapshot(self, snapshot: MarketSnapshot) -> list[OrderIntent]:
         ...
@@ -45,12 +53,14 @@ class PaperRunner:
         store: SnapshotStore,
         config: PaperConfig | None = None,
         on_intent: Callable[[OrderIntent], Awaitable[None]] | None = None,
+        refresh: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.source = source
         self.strategy = strategy
         self.store = store
         self.config = config or PaperConfig()
         self.on_intent = on_intent
+        self.refresh = refresh
         self._stop = asyncio.Event()
         self._market_exposure: dict[tuple[str, str], float] = {}
 
@@ -60,6 +70,8 @@ class PaperRunner:
     async def run(self) -> None:
         """Poll until stopped; errors are surfaced to the caller."""
         while not self._stop.is_set():
+            if self.refresh is not None:
+                await self.refresh()
             snapshots = await self.source.snapshots()
             for snapshot in snapshots:
                 self.store.append(snapshot)

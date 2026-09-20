@@ -13,6 +13,13 @@ from .metrics import BacktestMetrics, summarize
 from .strategies import BuyBelowThreshold, MeanReversionStrategy, MomentumStrategy
 from .experiments import ExperimentResult, compare_strategies
 from .sweep import SweepRow, run_sweep, write_csv
+from .market_making import (
+    MarketMakerConfig,
+    MarketMakerResult,
+    ReferencePrice,
+    simulate_reference_market_maker,
+)
+from .discovery import DiscoveredMarket, KalshiMarketDiscovery
 
 __all__ = [
     "BacktestResult",
@@ -42,4 +49,10 @@ __all__ = [
     "SweepRow",
     "run_sweep",
     "write_csv",
+    "MarketMakerConfig",
+    "MarketMakerResult",
+    "ReferencePrice",
+    "simulate_reference_market_maker",
+    "DiscoveredMarket",
+    "KalshiMarketDiscovery",
 ]

@@ -21,6 +21,11 @@ class KalshiPublicSource:
         self.market_tickers = tuple(market_tickers)
         self.base_url = base_url.rstrip("/")
 
+    def set_market_tickers(self, market_tickers: list[str]) -> None:
+        if not market_tickers:
+            raise ValueError("at least one market ticker is required")
+        self.market_tickers = tuple(dict.fromkeys(market_tickers))
+
     async def snapshots(self) -> list[MarketSnapshot]:
         return await asyncio.gather(
             *(asyncio.to_thread(self._fetch, ticker) for ticker in self.market_tickers)
