@@ -1,0 +1,22 @@
+[Unit]
+Description=Prediction-market paper data collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pmalpha
+Group=pmalpha
+WorkingDirectory=/opt/pm-alpha
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/pm-alpha/.venv/bin/python /opt/pm-alpha/run_kalshi_paper.py --db /var/lib/pm-alpha/market_data.sqlite --interval 1 REPLACE_WITH_TICKER
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pm-alpha
+
+[Install]
+WantedBy=multi-user.target
