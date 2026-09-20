@@ -117,6 +117,16 @@ Or run directly against the SQLite database produced by the Oracle collector:
 python run_sweep.py --sqlite data\market_data.sqlite --output data\sweep.csv
 ```
 
+Before interpreting a sweep, inspect whether the capture is large enough:
+
+```powershell
+python inspect_market_data.py data\oracle_market_data.sqlite
+```
+
+This reports per-market snapshot count, time range, quote coverage, average
+spread, and displayed top-of-book size. A market with sparse snapshots or low
+quote coverage should not be used to claim that a strategy works.
+
 This deliberately runs threshold, momentum, and mean-reversion grids as
 independent strategy instances. The output is a research ranking input, not a
 live-trading recommendation. A high return on one market or one fee setting is

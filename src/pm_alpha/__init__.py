@@ -20,6 +20,7 @@ from .market_making import (
     simulate_reference_market_maker,
 )
 from .discovery import DiscoveredMarket, KalshiMarketDiscovery
+from .report import MarketReport, inspect_database
 
 __all__ = [
     "BacktestResult",
@@ -55,4 +56,6 @@ __all__ = [
     "simulate_reference_market_maker",
     "DiscoveredMarket",
     "KalshiMarketDiscovery",
+    "MarketReport",
+    "inspect_database",
 ]
