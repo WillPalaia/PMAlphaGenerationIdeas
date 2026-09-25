@@ -6,8 +6,14 @@ import logging
 
 from pm_alpha.kalshi_source import KalshiPublicSource
 from pm_alpha.discovery import KalshiMarketDiscovery
-from pm_alpha.paper import PaperConfig, PaperRunner
+from pm_alpha.paper import MultiStrategy, PaperConfig, PaperPortfolio, PaperRunner
 from pm_alpha.storage import SnapshotStore
+from pm_alpha.strategies import (
+    BuyBelowThreshold,
+    MeanReversionStrategy,
+    MomentumStrategy,
+    StableHighProbabilityStrategy,
+)
 
 
 async def main() -> None:
@@ -17,6 +23,8 @@ async def main() -> None:
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument("--discover", action="store_true")
     parser.add_argument("--discovery-interval", type=float, default=300.0)
+    parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--fee-rate", type=float, default=0.01)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -34,17 +42,24 @@ async def main() -> None:
         next_discovery = now + args.discovery_interval
 
     store = SnapshotStore(args.db)
-
-    class NoOrderStrategy:
-        def on_snapshot(self, snapshot):
-            return []
+    portfolio = PaperPortfolio(store, starting_cash=args.starting_cash, fee_rate=args.fee_rate)
+    strategy = MultiStrategy({
+        "threshold": BuyBelowThreshold(0.40),
+        "momentum": MomentumStrategy(),
+        "mean-reversion": MeanReversionStrategy(),
+        "stable-high-probability": StableHighProbabilityStrategy(),
+    })
+    logging.getLogger(__name__).info(
+        "PAPER MODE ONLY: intents are simulated against snapshots; no live orders are sent"
+    )
 
     runner = PaperRunner(
         source,
-        NoOrderStrategy(),
+        strategy,
         store,
         PaperConfig(poll_interval_seconds=args.interval),
         refresh=refresh,
+        portfolio=portfolio,
     )
     try:
         await runner.run()

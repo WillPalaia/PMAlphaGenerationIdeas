@@ -23,6 +23,47 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_market_snapshots_lookup
     ON market_snapshots (venue, market_id, timestamp_ms);
+CREATE TABLE IF NOT EXISTS paper_orders (
+    client_order_id TEXT PRIMARY KEY,
+    timestamp_ms INTEGER NOT NULL,
+    venue TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    limit_price REAL NOT NULL,
+    signal TEXT NOT NULL,
+    status TEXT NOT NULL,
+    filled_quantity REAL NOT NULL DEFAULT 0,
+    reject_reason TEXT
+);
+CREATE TABLE IF NOT EXISTS paper_fills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    venue TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    price REAL NOT NULL,
+    fee REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paper_positions (
+    venue TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    average_cost REAL NOT NULL,
+    realized_pnl REAL NOT NULL DEFAULT 0,
+    settled INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (venue, market_id)
+);
+CREATE TABLE IF NOT EXISTS paper_equity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp_ms INTEGER NOT NULL,
+    cash REAL NOT NULL,
+    positions_value REAL NOT NULL,
+    equity REAL NOT NULL,
+    fees REAL NOT NULL
+);
 """
 
 
@@ -138,3 +179,7 @@ class SnapshotStore:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.row_factory = sqlite3.Row
         return connection
+
+    def connection(self) -> sqlite3.Connection:
+        """Return a configured connection for the paper portfolio layer."""
+        return self._connect()
