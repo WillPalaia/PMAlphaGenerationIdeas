@@ -72,6 +72,27 @@ and debugging data-quality problems. The database is not proof of fills or
 profitability by itself. In particular, a capture with empty books, sparse
 quotes, or no settlement records cannot validate a strategy.
 
+On Windows, the repository includes a one-command sync helper. It stops the
+collector briefly, copies the SQLite file consistently, restarts the service,
+downloads the copy, and optionally runs the diagnostics and baseline sweep:
+
+```powershell
+.\deploy\pull_oracle_data.ps1 `
+  -SshKey "C:\path\to\oracle.key" `
+  -OracleHost "157.151.132.129" `
+  -RunAnalysis
+```
+
+The default local output is `data\oracle_market_data.sqlite`. Use `-Output`
+to keep dated copies, for example
+`data\oracle_2026-09-25.sqlite`.
+
+WSL is not required. It can be useful if you prefer Linux tooling, but native
+Windows OpenSSH (`ssh` and `scp`) is sufficient. The Oracle database is kept
+separate because it is mutable runtime state and can grow continuously; the
+repository contains reproducible code and analysis, while the helper bridges
+the two without committing credentials or multi-gigabyte database files.
+
 This is a data-capture and paper-trading primitive, not evidence of
 profitability. A strategy must pass realistic fee, fill, latency, out-of-sample,
 and forward paper-trading gates before any live adapter is considered.
