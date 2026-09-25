@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -37,9 +39,18 @@ class KalshiMarketDiscovery:
             url = f"{self.base_url}/markets?status=open&limit=1000&mve_filter=exclude"
             if cursor:
                 url += f"&cursor={cursor}"
-            request = Request(url)
-            with urlopen(request, timeout=20) as response:
-                payload = json.load(response)
+            request = Request(url, headers={"User-Agent": "pm-alpha-paper/0.1"})
+            for attempt in range(4):
+                try:
+                    with urlopen(request, timeout=20) as response:
+                        payload = json.load(response)
+                    break
+                except HTTPError as exc:
+                    if exc.code not in {429, 500, 502, 503, 504} or attempt == 3:
+                        raise
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    delay = float(retry_after) if retry_after else 2.0 ** attempt
+                    time.sleep(min(delay, 30.0))
             for market in payload.get("markets", []):
                 ticker = market.get("ticker", "")
                 if not ticker or ticker.startswith("KXMV") or market.get("market_type") != "binary":

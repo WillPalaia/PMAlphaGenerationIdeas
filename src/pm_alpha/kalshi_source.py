@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from .models import MarketSnapshot
@@ -32,9 +33,11 @@ class KalshiPublicSource:
         )
 
     def _fetch(self, ticker: str) -> MarketSnapshot:
-        request = Request(f"{self.base_url}/markets/{ticker}/orderbook")
-        with urlopen(request, timeout=10) as response:
-            payload = json.load(response)
+        request = Request(
+            f"{self.base_url}/markets/{ticker}/orderbook",
+            headers={"User-Agent": "pm-alpha-paper/0.1"},
+        )
+        payload = self._fetch_json_with_backoff(request)
         orderbook = payload.get("orderbook", {})
         if not orderbook and payload.get("orderbook_fp"):
             orderbook = payload["orderbook_fp"]
@@ -56,6 +59,20 @@ class KalshiPublicSource:
             bid_size=bid_size,
             ask_size=ask_size,
         )
+
+    @staticmethod
+    def _fetch_json_with_backoff(request: Request) -> dict:
+        for attempt in range(4):
+            try:
+                with urlopen(request, timeout=10) as response:
+                    return json.load(response)
+            except HTTPError as exc:
+                if exc.code not in {429, 500, 502, 503, 504} or attempt == 3:
+                    raise
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                delay = float(retry_after) if retry_after else 2.0 ** attempt
+                time.sleep(min(delay, 30.0))
+        raise RuntimeError("unreachable retry state")
 
     @staticmethod
     def _best(levels: list, reverse: bool) -> tuple[float | None, float]:

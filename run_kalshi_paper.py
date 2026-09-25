@@ -29,7 +29,7 @@ async def main() -> None:
         now = asyncio.get_running_loop().time()
         if not args.discover or now < next_discovery:
             return
-        discovered = await discovery.discover(limit=100)
+        discovered = await discovery.discover(limit=20)
         source.set_market_tickers([market.ticker for market in discovered])
         next_discovery = now + args.discovery_interval
 
