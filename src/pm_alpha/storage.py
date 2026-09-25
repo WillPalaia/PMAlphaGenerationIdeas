@@ -133,6 +133,8 @@ class SnapshotStore:
         return [(row[0], row[1]) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
+        connection = sqlite3.connect(self.path, timeout=30.0)
+        connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute("PRAGMA journal_mode = WAL")
         connection.row_factory = sqlite3.Row
         return connection
