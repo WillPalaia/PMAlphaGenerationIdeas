@@ -33,6 +33,8 @@ python run_kalshi_paper.py KX-MARKET-TICKER --discover --db data\market_data.sql
 The discovery mode is still public-data paper capture. It does not identify
 whether a Kalshi contract is legally identical to a sportsbook line; that
 requires an authorized reference feed and manual contract-rule verification.
+The collector backs off on Kalshi rate limits, limits concurrent requests, and
+skips an individual unavailable ticker without stopping the service.
 
 ## External-reference market-making research
 
@@ -60,6 +62,15 @@ This simulator only fills when the observed book crosses the quote. It does
 not assume queue priority, guaranteed fills, or that similar contract titles
 have identical settlement rules. Positive results from synthetic candles or
 unverified line matches are not evidence of a live edge.
+
+## Why copy the SQLite database?
+
+The Oracle process can perform forward paper trading continuously and can
+produce online counters. Copying the database is only needed for retrospective
+analysis: walk-forward splits, market-by-market comparisons, parameter sweeps,
+and debugging data-quality problems. The database is not proof of fills or
+profitability by itself. In particular, a capture with empty books, sparse
+quotes, or no settlement records cannot validate a strategy.
 
 This is a data-capture and paper-trading primitive, not evidence of
 profitability. A strategy must pass realistic fee, fill, latency, out-of-sample,

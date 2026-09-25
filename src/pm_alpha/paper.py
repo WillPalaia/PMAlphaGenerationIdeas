@@ -73,8 +73,8 @@ class PaperRunner:
             if self.refresh is not None:
                 await self.refresh()
             snapshots = await self.source.snapshots()
+            self.store.append_many(snapshots)
             for snapshot in snapshots:
-                self.store.append(snapshot)
                 for intent in self.strategy.on_snapshot(snapshot):
                     if not self._is_allowed(intent):
                         logger.warning("Rejected paper intent %s by risk limits", intent.client_order_id)
