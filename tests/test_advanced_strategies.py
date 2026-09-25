@@ -211,3 +211,61 @@ def test_ema_crossover_sells_on_death_cross():
     assert sells[0].signal == "ema-death-cross-exit"
     assert ("kalshi", "m1") not in strategy._positions
 
+
+def test_time_decay_holds_and_harvests_at_near_parity():
+    strategy = TimeDecayYieldStrategy(target_min_price=0.80, target_max_price=0.95, lookback=2)
+    list(strategy.on_snapshot(MarketSnapshot(1, "kalshi", "m1", 0.84, 0.85, 10, 10)))
+    buys = list(strategy.on_snapshot(MarketSnapshot(2, "kalshi", "m1", 0.84, 0.85, 10, 10)))
+    assert len(buys) == 1
+    assert buys[0].side == Side.BUY
+
+    # Price moves to 0.93 (+0.08 from entry): Should NOT sell, because yield holds for convergence!
+    no_sells = list(strategy.on_snapshot(MarketSnapshot(3, "kalshi", "m1", 0.93, 0.94, 10, 10)))
+    assert len(no_sells) == 0
+    assert ("kalshi", "m1") in strategy._positions
+
+    # Price reaches near-parity 0.97 (>= harvest_price): Now harvests yield!
+    sells = list(strategy.on_snapshot(MarketSnapshot(4, "kalshi", "m1", 0.97, 0.98, 10, 10)))
+    assert len(sells) == 1
+    assert sells[0].side == Side.SELL
+    assert sells[0].signal == "theta-decay-harvested"
+    assert ("kalshi", "m1") not in strategy._positions
+
+
+def test_range_breakout_rides_past_small_gains_to_parity():
+    strategy = RangeBreakoutStrategy(lookback=3, breakout_margin=0.02)
+    # Channel high is 0.50
+    for t in (1, 2, 3):
+        list(strategy.on_snapshot(MarketSnapshot(t, "kalshi", "m1", 0.49, 0.50, 10, 10)))
+    # Breakout to 0.53
+    buys = list(strategy.on_snapshot(MarketSnapshot(4, "kalshi", "m1", 0.52, 0.53, 10, 10)))
+    assert len(buys) == 1
+    assert buys[0].side == Side.BUY
+
+    # Price at 0.65 (+0.12 gain): Does NOT sell for small gain, lets trend expand!
+    no_sells = list(strategy.on_snapshot(MarketSnapshot(5, "kalshi", "m1", 0.65, 0.66, 10, 10)))
+    assert len(no_sells) == 0
+    assert ("kalshi", "m1") in strategy._positions
+
+    # Price reaches parity target 0.94: Takes profit near certainty
+    sells = list(strategy.on_snapshot(MarketSnapshot(6, "kalshi", "m1", 0.94, 0.95, 10, 10)))
+    assert len(sells) == 1
+    assert sells[0].side == Side.SELL
+    assert sells[0].signal == "breakout-take-profit"
+    assert ("kalshi", "m1") not in strategy._positions
+
+
+def test_order_book_imbalance_cuts_on_queue_flip():
+    strategy = OrderBookImbalanceStrategy(imbalance_threshold=0.5, max_spread=0.04, min_depth=5.0)
+    # Enter on positive imbalance
+    buys = list(strategy.on_snapshot(MarketSnapshot(1, "kalshi", "m1", 0.50, 0.52, 40, 5)))
+    assert len(buys) == 1
+
+    # Book flips to heavy selling pressure (bid=5, ask=40 -> OBI = -0.77 <= -0.30)
+    sells = list(strategy.on_snapshot(MarketSnapshot(2, "kalshi", "m1", 0.50, 0.52, 5, 40)))
+    assert len(sells) == 1
+    assert sells[0].side == Side.SELL
+    assert sells[0].signal == "imbalance-flip-exit"
+    assert ("kalshi", "m1") not in strategy._positions
+
+

@@ -69,8 +69,9 @@ class BuyBelowThreshold:
         threshold: float,
         quantity: float = 1.0,
         max_orders: int = 1,
-        take_profit: float = 0.15,
+        take_profit: float = 0.25,
         stop_loss: float = 0.15,
+        parity_target: float = 0.90,
     ):
         if not 0 < threshold <= 1 or quantity <= 0 or max_orders <= 0:
             raise ValueError("threshold, quantity, and max_orders must be positive")
@@ -79,6 +80,7 @@ class BuyBelowThreshold:
         self.max_orders = max_orders
         self.take_profit = take_profit
         self.stop_loss = stop_loss
+        self.parity_target = parity_target
         self._orders = 0
         self._positions: dict[tuple[str, str], float] = {}
 
@@ -90,7 +92,7 @@ class BuyBelowThreshold:
 
         if key in self._positions and snapshot.yes_bid is not None:
             entry = self._positions[key]
-            if snapshot.yes_bid >= entry + self.take_profit:
+            if snapshot.yes_bid >= self.parity_target or snapshot.yes_bid >= entry + self.take_profit:
                 del self._positions[key]
                 self._orders += 1
                 yield OrderIntent(
@@ -151,8 +153,9 @@ class MomentumStrategy:
         minimum_move: float = 0.02,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
-        take_profit: float = 0.08,
-        stop_loss: float = 0.06,
+        take_profit: float = 0.25,
+        stop_loss: float = 0.10,
+        parity_target: float = 0.94,
     ):
         if lookback <= 0 or minimum_move < 0 or quantity <= 0:
             raise ValueError("lookback and quantity must be positive")
@@ -162,6 +165,7 @@ class MomentumStrategy:
         self.max_orders_per_market = max_orders_per_market
         self.take_profit = take_profit
         self.stop_loss = stop_loss
+        self.parity_target = parity_target
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -176,7 +180,7 @@ class MomentumStrategy:
 
         if key in self._positions and snapshot.yes_bid is not None:
             entry = self._positions[key]
-            if snapshot.yes_bid >= entry + self.take_profit:
+            if snapshot.yes_bid >= self.parity_target or snapshot.yes_bid >= entry + self.take_profit:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -351,8 +355,8 @@ class StableHighProbabilityStrategy:
         max_range: float = 0.03,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
-        take_profit_price: float = 0.85,
-        stop_loss_price: float = 0.55,
+        take_profit_price: float = 0.95,
+        stop_loss_price: float = 0.45,
     ):
         if not 0 < lower_price <= upper_price <= 1:
             raise ValueError("invalid probability band")
@@ -447,18 +451,20 @@ class FavoriteYieldStrategy:
 
     Prediction markets systematically underprice heavy favorites because retail
     traders prefer lottery-style payoffs. This strategy targets contracts in a high
-    confidence zone (default 0.85 - 0.96) that exhibit price stability, holding
-    to capture the 4-15% discount to parity.
+    confidence zone (default 0.85 - 0.95) that exhibit price stability, holding
+    through settlement to capture the discount to parity or harvesting at >= 0.97.
     """
 
     def __init__(
         self,
         min_probability: float = 0.85,
-        max_probability: float = 0.96,
+        max_probability: float = 0.95,
         lookback: int = 5,
         max_range: float = 0.04,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
+        harvest_price: float = 0.97,
+        stop_loss_price: float = 0.50,
     ):
         if not (0.0 < min_probability <= max_probability < 1.0):
             raise ValueError("invalid probability range")
@@ -470,6 +476,8 @@ class FavoriteYieldStrategy:
         self.max_range = max_range
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
+        self.harvest_price = harvest_price
+        self.stop_loss_price = stop_loss_price
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -482,9 +490,9 @@ class FavoriteYieldStrategy:
             self._orders[key] = 0
             return
 
-        # Exit logic: harvest yield early once contract is >= 0.96 or stop out on collapse
+        # Exit logic: harvest yield early once contract reaches near-parity (>= harvest_price) or stop out on collapse
         if key in self._positions and snapshot.yes_bid is not None:
-            if snapshot.yes_bid >= 0.96:
+            if snapshot.yes_bid >= self.harvest_price:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -500,7 +508,7 @@ class FavoriteYieldStrategy:
                     strategy="favorite-yield",
                 )
                 return
-            elif snapshot.yes_bid <= 0.72:
+            elif snapshot.yes_bid <= self.stop_loss_price:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -562,6 +570,9 @@ class OrderBookImbalanceStrategy:
         min_depth: float = 1.0,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
+        take_profit: float = 0.05,
+        stop_loss: float = 0.05,
+        exit_imbalance: float = -0.30,
     ):
         if not (-1.0 < imbalance_threshold < 1.0):
             raise ValueError("imbalance_threshold must be between -1 and 1")
@@ -572,6 +583,9 @@ class OrderBookImbalanceStrategy:
         self.min_depth = min_depth
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
+        self.take_profit = take_profit
+        self.stop_loss = stop_loss
+        self.exit_imbalance = exit_imbalance
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
@@ -589,7 +603,7 @@ class OrderBookImbalanceStrategy:
         # Exit logic: scalp profit or cut when queue flips to heavy selling
         if key in self._positions and snapshot.yes_bid is not None:
             entry = self._positions[key]
-            if snapshot.yes_bid >= entry + 0.05:
+            if snapshot.yes_bid >= entry + self.take_profit:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -605,7 +619,7 @@ class OrderBookImbalanceStrategy:
                     strategy="orderbook-imbalance",
                 )
                 return
-            elif imbalance <= -0.30 or snapshot.yes_bid <= entry - 0.05:
+            elif imbalance <= self.exit_imbalance or snapshot.yes_bid <= entry - self.stop_loss:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -753,6 +767,8 @@ class RangeBreakoutStrategy:
         max_price: float = 0.90,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
+        take_profit: float = 0.25,
+        parity_target: float = 0.94,
     ):
         if lookback <= 1 or breakout_margin < 0 or quantity <= 0 or max_orders_per_market <= 0:
             raise ValueError("invalid range breakout parameters")
@@ -764,6 +780,8 @@ class RangeBreakoutStrategy:
         self.max_price = max_price
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
+        self.take_profit = take_profit
+        self.parity_target = parity_target
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -782,7 +800,7 @@ class RangeBreakoutStrategy:
         if key in self._positions and snapshot.yes_bid is not None and len(history) >= self.lookback:
             entry = self._positions[key]
             channel_mid = (max(history) + min(history)) / 2.0
-            if snapshot.yes_bid >= entry + 0.12:
+            if snapshot.yes_bid >= self.parity_target or snapshot.yes_bid >= entry + self.take_profit:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -859,6 +877,8 @@ class EmaCrossoverStrategy:
         min_cross_diff: float = 0.01,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
+        take_profit: float = 0.30,
+        parity_target: float = 0.95,
     ):
         if (
             fast_span <= 0
@@ -873,6 +893,8 @@ class EmaCrossoverStrategy:
         self.min_cross_diff = min_cross_diff
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
+        self.take_profit = take_profit
+        self.parity_target = parity_target
         self._fast_ema: dict[tuple[str, str], float] = {}
         self._slow_ema: dict[tuple[str, str], float] = {}
         self._positions: dict[tuple[str, str], float] = {}
@@ -922,7 +944,7 @@ class EmaCrossoverStrategy:
                     strategy="ema-crossover",
                 )
                 return
-            elif snapshot.yes_bid >= entry + 0.15:
+            elif snapshot.yes_bid >= self.parity_target or snapshot.yes_bid >= entry + self.take_profit:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -1106,6 +1128,9 @@ class VwapPullbackStrategy:
         trend_lookback: int = 10,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
+        take_profit: float = 0.20,
+        parity_target: float = 0.92,
+        stop_deviation: float = 0.06,
     ):
         if (
             lookback <= 1
@@ -1120,6 +1145,9 @@ class VwapPullbackStrategy:
         self.trend_lookback = trend_lookback
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
+        self.take_profit = take_profit
+        self.parity_target = parity_target
+        self.stop_deviation = stop_deviation
         self._history: dict[tuple[str, str], list[tuple[float, float]]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -1139,7 +1167,7 @@ class VwapPullbackStrategy:
             entry = self._positions[key]
             total_vol = sum(s for _, s in history)
             vwap = sum(p * s for p, s in history) / total_vol if total_vol > 0 else entry
-            if snapshot.yes_bid >= entry + 0.08:
+            if snapshot.yes_bid >= self.parity_target or snapshot.yes_bid >= entry + self.take_profit:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -1155,7 +1183,7 @@ class VwapPullbackStrategy:
                     strategy="vwap-pullback",
                 )
                 return
-            elif snapshot.yes_bid < vwap - 0.06:
+            elif snapshot.yes_bid < vwap - self.stop_deviation:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -1223,6 +1251,9 @@ class JumpFollowingStrategy:
         lookback: int = 3,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
+        take_profit: float = 0.20,
+        parity_target: float = 0.92,
+        stop_loss: float = 0.08,
     ):
         if jump_threshold <= 0 or lookback <= 0 or quantity <= 0 or max_orders_per_market <= 0:
             raise ValueError("invalid jump following parameters")
@@ -1230,6 +1261,9 @@ class JumpFollowingStrategy:
         self.lookback = lookback
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
+        self.take_profit = take_profit
+        self.parity_target = parity_target
+        self.stop_loss = stop_loss
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -1245,7 +1279,7 @@ class JumpFollowingStrategy:
         # Exit logic: take profit on post-jump drift or cut on stall
         if key in self._positions and snapshot.yes_bid is not None:
             entry = self._positions[key]
-            if snapshot.yes_bid >= entry + 0.10:
+            if snapshot.yes_bid >= self.parity_target or snapshot.yes_bid >= entry + self.take_profit:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -1261,7 +1295,7 @@ class JumpFollowingStrategy:
                     strategy="jump-following",
                 )
                 return
-            elif snapshot.yes_bid <= entry - 0.05:
+            elif snapshot.yes_bid <= entry - self.stop_loss:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -1323,6 +1357,8 @@ class TimeDecayYieldStrategy:
         max_volatility: float = 0.02,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
+        harvest_price: float = 0.97,
+        stop_loss_price: float = 0.50,
     ):
         if not (0.0 < target_min_price <= target_max_price < 1.0):
             raise ValueError("invalid price boundaries")
@@ -1334,6 +1370,8 @@ class TimeDecayYieldStrategy:
         self.max_volatility = max_volatility
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
+        self.harvest_price = harvest_price
+        self.stop_loss_price = stop_loss_price
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -1346,10 +1384,9 @@ class TimeDecayYieldStrategy:
             self._orders[key] = 0
             return
 
-        # Exit logic: harvest yield once contract approaches 0.96+ or stop out on adverse move
+        # Exit logic: harvest yield once contract approaches 0.97+ or stop out on collapse
         if key in self._positions and snapshot.yes_bid is not None:
-            entry = self._positions[key]
-            if snapshot.yes_bid >= 0.96 or snapshot.yes_bid >= entry + 0.08:
+            if snapshot.yes_bid >= self.harvest_price:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -1365,7 +1402,7 @@ class TimeDecayYieldStrategy:
                     strategy="time-decay-yield",
                 )
                 return
-            elif snapshot.yes_bid <= 0.70:
+            elif snapshot.yes_bid <= self.stop_loss_price:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
