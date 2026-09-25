@@ -64,21 +64,71 @@ def find_complement_opportunity(
 class BuyBelowThreshold:
     """Diagnostic directional baseline for historical candle experiments."""
 
-    def __init__(self, threshold: float, quantity: float = 1.0, max_orders: int = 1):
+    def __init__(
+        self,
+        threshold: float,
+        quantity: float = 1.0,
+        max_orders: int = 1,
+        take_profit: float = 0.15,
+        stop_loss: float = 0.15,
+    ):
         if not 0 < threshold <= 1 or quantity <= 0 or max_orders <= 0:
             raise ValueError("threshold, quantity, and max_orders must be positive")
         self.threshold = threshold
         self.quantity = quantity
         self.max_orders = max_orders
+        self.take_profit = take_profit
+        self.stop_loss = stop_loss
         self._orders = 0
+        self._positions: dict[tuple[str, str], float] = {}
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            return
+
+        if key in self._positions and snapshot.yes_bid is not None:
+            entry = self._positions[key]
+            if snapshot.yes_bid >= entry + self.take_profit:
+                del self._positions[key]
+                self._orders += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"threshold-tp-{self._orders}",
+                    signal="threshold-take-profit",
+                    strategy="buy-below-threshold",
+                )
+                return
+            elif snapshot.yes_bid <= entry - self.stop_loss:
+                del self._positions[key]
+                self._orders += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"threshold-sl-{self._orders}",
+                    signal="threshold-stop-loss",
+                    strategy="buy-below-threshold",
+                )
+                return
+
         if (
             self._orders < self.max_orders
             and snapshot.yes_ask is not None
             and snapshot.yes_ask <= self.threshold
+            and key not in self._positions
         ):
             self._orders += 1
+            self._positions[key] = snapshot.yes_ask
             yield OrderIntent(
                 timestamp_ms=snapshot.timestamp_ms,
                 venue=snapshot.venue,
@@ -95,22 +145,81 @@ class BuyBelowThreshold:
 class MomentumStrategy:
     """Simple lagged momentum baseline; intentionally no future data access."""
 
-    def __init__(self, lookback: int = 3, minimum_move: float = 0.02, quantity: float = 1.0):
+    def __init__(
+        self,
+        lookback: int = 3,
+        minimum_move: float = 0.02,
+        quantity: float = 1.0,
+        max_orders_per_market: int = 1,
+        take_profit: float = 0.08,
+        stop_loss: float = 0.06,
+    ):
         if lookback <= 0 or minimum_move < 0 or quantity <= 0:
             raise ValueError("lookback and quantity must be positive")
         self.lookback = lookback
         self.minimum_move = minimum_move
         self.quantity = quantity
+        self.max_orders_per_market = max_orders_per_market
+        self.take_profit = take_profit
+        self.stop_loss = stop_loss
         self._history: dict[tuple[str, str], list[float]] = {}
-        self._orders = 0
+        self._positions: dict[tuple[str, str], float] = {}
+        self._orders: dict[tuple[str, str], int] = {}
+        self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        if key in self._positions and snapshot.yes_bid is not None:
+            entry = self._positions[key]
+            if snapshot.yes_bid >= entry + self.take_profit:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"momentum-tp-{self._counter}",
+                    signal="momentum-take-profit",
+                    strategy="positive-momentum",
+                )
+                return
+            elif snapshot.yes_bid <= entry - self.stop_loss:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"momentum-sl-{self._counter}",
+                    signal="momentum-stop-loss",
+                    strategy="positive-momentum",
+                )
+                return
+
         if snapshot.yes_ask is None:
             return
-        key = (snapshot.venue, snapshot.market_id)
         history = self._history.setdefault(key, [])
-        if history and snapshot.yes_ask - history[-1] >= self.minimum_move:
-            self._orders += 1
+        if (
+            history
+            and snapshot.yes_ask - history[-1] >= self.minimum_move
+            and self._orders.get(key, 0) < self.max_orders_per_market
+        ):
+            self._orders[key] = self._orders.get(key, 0) + 1
+            self._positions[key] = snapshot.yes_ask
+            self._counter += 1
             yield OrderIntent(
                 timestamp_ms=snapshot.timestamp_ms,
                 venue=snapshot.venue,
@@ -118,7 +227,7 @@ class MomentumStrategy:
                 side=Side.BUY,
                 quantity=self.quantity,
                 limit_price=snapshot.yes_ask,
-                client_order_id=f"momentum-{self._orders}",
+                client_order_id=f"momentum-{self._counter}",
                 signal="positive-momentum",
                 strategy="positive-momentum",
             )
@@ -136,6 +245,7 @@ class MeanReversionStrategy:
         deviation: float = 0.05,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
+        stop_loss: float = 0.10,
     ):
         if lookback <= 1 or deviation < 0 or quantity <= 0 or max_orders_per_market <= 0:
             raise ValueError("invalid mean-reversion parameters")
@@ -143,22 +253,71 @@ class MeanReversionStrategy:
         self.deviation = deviation
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
+        self.stop_loss = stop_loss
         self._history: dict[tuple[str, str], list[float]] = {}
+        self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
-        if snapshot.yes_ask is None:
-            return
         key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        price = snapshot.yes_ask if snapshot.yes_ask is not None else snapshot.yes_bid
+        if price is None:
+            return
+
         history = self._history.setdefault(key, [])
-        if len(history) >= self.lookback:
-            mean = sum(history[-self.lookback:]) / self.lookback
+        mean = sum(history[-self.lookback:]) / len(history[-self.lookback:]) if history else price
+
+        # Exit logic: sell when reverted to rolling mean or stopped out
+        if key in self._positions and snapshot.yes_bid is not None and len(history) >= self.lookback:
+            entry = self._positions[key]
+            if snapshot.yes_bid >= mean:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"reversion-exit-{self._counter}",
+                    signal="mean-reverted-exit",
+                    strategy="mean-reversion",
+                )
+                return
+            elif snapshot.yes_bid <= entry - self.stop_loss:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"reversion-sl-{self._counter}",
+                    signal="mean-reversion-stop-loss",
+                    strategy="mean-reversion",
+                )
+                return
+
+        # Buy logic
+        if len(history) >= self.lookback and snapshot.yes_ask is not None:
             if (
                 snapshot.yes_ask <= mean - self.deviation
                 and self._orders.get(key, 0) < self.max_orders_per_market
+                and key not in self._positions
             ):
                 self._orders[key] = self._orders.get(key, 0) + 1
+                self._positions[key] = snapshot.yes_ask
                 self._counter += 1
                 yield OrderIntent(
                     timestamp_ms=snapshot.timestamp_ms,
@@ -171,7 +330,7 @@ class MeanReversionStrategy:
                     signal="below-rolling-mean",
                     strategy="mean-reversion",
                 )
-        history.append(snapshot.yes_ask)
+        history.append(price)
         if len(history) > self.lookback:
             del history[0]
 
@@ -192,6 +351,8 @@ class StableHighProbabilityStrategy:
         max_range: float = 0.03,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
+        take_profit_price: float = 0.85,
+        stop_loss_price: float = 0.55,
     ):
         if not 0 < lower_price <= upper_price <= 1:
             raise ValueError("invalid probability band")
@@ -203,14 +364,57 @@ class StableHighProbabilityStrategy:
         self.max_range = max_range
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
+        self.take_profit_price = take_profit_price
+        self.stop_loss_price = stop_loss_price
         self._history: dict[tuple[str, str], list[float]] = {}
+        self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        if key in self._positions and snapshot.yes_bid is not None:
+            if snapshot.yes_bid >= self.take_profit_price:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"stable-tp-{self._counter}",
+                    signal="stable-high-take-profit",
+                    strategy="stable-high-probability",
+                )
+                return
+            elif snapshot.yes_bid <= self.stop_loss_price:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"stable-sl-{self._counter}",
+                    signal="stable-high-stop-loss",
+                    strategy="stable-high-probability",
+                )
+                return
+
         if snapshot.yes_ask is None:
             return
-        key = (snapshot.venue, snapshot.market_id)
+
         history = self._history.setdefault(key, [])
         history.append(snapshot.yes_ask)
         if len(history) > self.lookback:
@@ -220,8 +424,10 @@ class StableHighProbabilityStrategy:
             and self.lower_price <= snapshot.yes_ask <= self.upper_price
             and max(history) - min(history) <= self.max_range
             and self._orders.get(key, 0) < self.max_orders_per_market
+            and key not in self._positions
         ):
             self._orders[key] = self._orders.get(key, 0) + 1
+            self._positions[key] = snapshot.yes_ask
             self._counter += 1
             yield OrderIntent(
                 timestamp_ms=snapshot.timestamp_ms,
@@ -265,13 +471,55 @@ class FavoriteYieldStrategy:
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
         self._history: dict[tuple[str, str], list[float]] = {}
+        self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        # Exit logic: harvest yield early once contract is >= 0.96 or stop out on collapse
+        if key in self._positions and snapshot.yes_bid is not None:
+            if snapshot.yes_bid >= 0.96:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"fav-harvest-{self._counter}",
+                    signal="favorite-yield-harvested",
+                    strategy="favorite-yield",
+                )
+                return
+            elif snapshot.yes_bid <= 0.72:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"fav-sl-{self._counter}",
+                    signal="favorite-yield-stop-loss",
+                    strategy="favorite-yield",
+                )
+                return
+
         if snapshot.yes_ask is None:
             return
-        key = (snapshot.venue, snapshot.market_id)
+
         history = self._history.setdefault(key, [])
         history.append(snapshot.yes_ask)
         if len(history) > self.lookback:
@@ -281,8 +529,10 @@ class FavoriteYieldStrategy:
             and self.min_probability <= snapshot.yes_ask <= self.max_probability
             and max(history) - min(history) <= self.max_range
             and self._orders.get(key, 0) < self.max_orders_per_market
+            and key not in self._positions
         ):
             self._orders[key] = self._orders.get(key, 0) + 1
+            self._positions[key] = snapshot.yes_ask
             self._counter += 1
             yield OrderIntent(
                 timestamp_ms=snapshot.timestamp_ms,
@@ -322,26 +572,72 @@ class OrderBookImbalanceStrategy:
         self.min_depth = min_depth
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
+        self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        total_depth = (snapshot.bid_size + snapshot.ask_size) if (snapshot.bid_size and snapshot.ask_size) else 0.0
+        imbalance = ((snapshot.bid_size - snapshot.ask_size) / total_depth) if total_depth > 0 else 0.0
+
+        # Exit logic: scalp profit or cut when queue flips to heavy selling
+        if key in self._positions and snapshot.yes_bid is not None:
+            entry = self._positions[key]
+            if snapshot.yes_bid >= entry + 0.05:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"ob-scalp-{self._counter}",
+                    signal="imbalance-scalp-profit",
+                    strategy="orderbook-imbalance",
+                )
+                return
+            elif imbalance <= -0.30 or snapshot.yes_bid <= entry - 0.05:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"ob-exit-{self._counter}",
+                    signal="imbalance-flip-exit",
+                    strategy="orderbook-imbalance",
+                )
+                return
+
         if snapshot.yes_ask is None or snapshot.yes_bid is None:
             return
-        total_depth = snapshot.bid_size + snapshot.ask_size
         if total_depth < self.min_depth:
             return
         spread = snapshot.yes_ask - snapshot.yes_bid
         if spread > self.max_spread:
             return
-        imbalance = (snapshot.bid_size - snapshot.ask_size) / total_depth
-        key = (snapshot.venue, snapshot.market_id)
+
         if (
             imbalance >= self.imbalance_threshold
             and self._orders.get(key, 0) < self.max_orders_per_market
             and snapshot.ask_size > 0
+            and key not in self._positions
         ):
             self._orders[key] = self._orders.get(key, 0) + 1
+            self._positions[key] = snapshot.yes_ask
             self._counter += 1
             yield OrderIntent(
                 timestamp_ms=snapshot.timestamp_ms,
@@ -469,22 +765,69 @@ class RangeBreakoutStrategy:
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
         self._history: dict[tuple[str, str], list[float]] = {}
+        self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        history = self._history.setdefault(key, [])
+
+        # Exit logic: take profit on strong drift or exit when price falls below channel midline
+        if key in self._positions and snapshot.yes_bid is not None and len(history) >= self.lookback:
+            entry = self._positions[key]
+            channel_mid = (max(history) + min(history)) / 2.0
+            if snapshot.yes_bid >= entry + 0.12:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"breakout-tp-{self._counter}",
+                    signal="breakout-take-profit",
+                    strategy="range-breakout",
+                )
+                return
+            elif snapshot.yes_bid <= channel_mid:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"breakout-mid-{self._counter}",
+                    signal="breakout-channel-exit",
+                    strategy="range-breakout",
+                )
+                return
+
         if snapshot.yes_ask is None:
             return
-        key = (snapshot.venue, snapshot.market_id)
-        history = self._history.setdefault(key, [])
+
         if len(history) >= self.lookback:
             channel_high = max(history)
             if (
                 snapshot.yes_ask >= channel_high + self.breakout_margin
                 and self.min_price <= snapshot.yes_ask <= self.max_price
                 and self._orders.get(key, 0) < self.max_orders_per_market
+                and key not in self._positions
             ):
                 self._orders[key] = self._orders.get(key, 0) + 1
+                self._positions[key] = snapshot.yes_ask
                 self._counter += 1
                 yield OrderIntent(
                     timestamp_ms=snapshot.timestamp_ms,
@@ -532,15 +875,21 @@ class EmaCrossoverStrategy:
         self.max_orders_per_market = max_orders_per_market
         self._fast_ema: dict[tuple[str, str], float] = {}
         self._slow_ema: dict[tuple[str, str], float] = {}
+        self._positions: dict[tuple[str, str], float] = {}
         self._was_below: dict[tuple[str, str], bool] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
         price = snapshot.yes_ask if snapshot.yes_ask is not None else snapshot.yes_bid
         if price is None:
             return
-        key = (snapshot.venue, snapshot.market_id)
         if key not in self._fast_ema:
             self._fast_ema[key] = price
             self._slow_ema[key] = price
@@ -554,6 +903,42 @@ class EmaCrossoverStrategy:
 
         current_diff = fast - slow
 
+        # Exit logic: sell if fast EMA falls back below slow EMA (trend reversed) or take profit
+        if key in self._positions and snapshot.yes_bid is not None:
+            entry = self._positions[key]
+            if current_diff < 0:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"ema-exit-{self._counter}",
+                    signal="ema-death-cross-exit",
+                    strategy="ema-crossover",
+                )
+                return
+            elif snapshot.yes_bid >= entry + 0.15:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"ema-tp-{self._counter}",
+                    signal="ema-trend-take-profit",
+                    strategy="ema-crossover",
+                )
+                return
+
         if current_diff < 0:
             self._was_below[key] = True
 
@@ -563,9 +948,11 @@ class EmaCrossoverStrategy:
             and current_diff >= self.min_cross_diff
             and snapshot.yes_ask is not None
             and self._orders.get(key, 0) < self.max_orders_per_market
+            and key not in self._positions
         ):
             self._was_below[key] = False
             self._orders[key] = self._orders.get(key, 0) + 1
+            self._positions[key] = snapshot.yes_ask
             self._counter += 1
             yield OrderIntent(
                 timestamp_ms=snapshot.timestamp_ms,
@@ -734,16 +1121,61 @@ class VwapPullbackStrategy:
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
         self._history: dict[tuple[str, str], list[tuple[float, float]]] = {}
+        self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        history = self._history.setdefault(key, [])
+
+        # Exit logic: sell when rebound hits profit target or if price breaks below VWAP stop
+        if key in self._positions and snapshot.yes_bid is not None and len(history) >= self.lookback:
+            entry = self._positions[key]
+            total_vol = sum(s for _, s in history)
+            vwap = sum(p * s for p, s in history) / total_vol if total_vol > 0 else entry
+            if snapshot.yes_bid >= entry + 0.08:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"vwap-tp-{self._counter}",
+                    signal="vwap-bounce-profit",
+                    strategy="vwap-pullback",
+                )
+                return
+            elif snapshot.yes_bid < vwap - 0.06:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"vwap-stop-{self._counter}",
+                    signal="vwap-breakdown-stop",
+                    strategy="vwap-pullback",
+                )
+                return
+
         price = snapshot.yes_ask
         size = snapshot.ask_size
         if price is None or size <= 0:
             return
-        key = (snapshot.venue, snapshot.market_id)
-        history = self._history.setdefault(key, [])
         history.append((price, size))
         if len(history) > self.lookback:
             del history[0]
@@ -760,8 +1192,10 @@ class VwapPullbackStrategy:
                     is_uptrend
                     and price <= vwap - self.pullback_threshold
                     and self._orders.get(key, 0) < self.max_orders_per_market
+                    and key not in self._positions
                 ):
                     self._orders[key] = self._orders.get(key, 0) + 1
+                    self._positions[key] = price
                     self._counter += 1
                     yield OrderIntent(
                         timestamp_ms=snapshot.timestamp_ms,
@@ -797,21 +1231,66 @@ class JumpFollowingStrategy:
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
         self._history: dict[tuple[str, str], list[float]] = {}
+        self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        # Exit logic: take profit on post-jump drift or cut on stall
+        if key in self._positions and snapshot.yes_bid is not None:
+            entry = self._positions[key]
+            if snapshot.yes_bid >= entry + 0.10:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"jump-tp-{self._counter}",
+                    signal="jump-follow-take-profit",
+                    strategy="jump-following",
+                )
+                return
+            elif snapshot.yes_bid <= entry - 0.05:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"jump-sl-{self._counter}",
+                    signal="jump-follow-stop-loss",
+                    strategy="jump-following",
+                )
+                return
+
         if snapshot.yes_ask is None:
             return
-        key = (snapshot.venue, snapshot.market_id)
+
         history = self._history.setdefault(key, [])
         if history:
             price_change = snapshot.yes_ask - history[0]
             if (
                 price_change >= self.jump_threshold
                 and self._orders.get(key, 0) < self.max_orders_per_market
+                and key not in self._positions
             ):
                 self._orders[key] = self._orders.get(key, 0) + 1
+                self._positions[key] = snapshot.yes_ask
                 self._counter += 1
                 yield OrderIntent(
                     timestamp_ms=snapshot.timestamp_ms,
@@ -856,13 +1335,56 @@ class TimeDecayYieldStrategy:
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
         self._history: dict[tuple[str, str], list[float]] = {}
+        self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        # Exit logic: harvest yield once contract approaches 0.96+ or stop out on adverse move
+        if key in self._positions and snapshot.yes_bid is not None:
+            entry = self._positions[key]
+            if snapshot.yes_bid >= 0.96 or snapshot.yes_bid >= entry + 0.08:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"decay-tp-{self._counter}",
+                    signal="theta-decay-harvested",
+                    strategy="time-decay-yield",
+                )
+                return
+            elif snapshot.yes_bid <= 0.70:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"decay-sl-{self._counter}",
+                    signal="theta-decay-stop-loss",
+                    strategy="time-decay-yield",
+                )
+                return
+
         if snapshot.yes_ask is None:
             return
-        key = (snapshot.venue, snapshot.market_id)
+
         history = self._history.setdefault(key, [])
         history.append(snapshot.yes_ask)
         if len(history) > self.lookback:
@@ -873,8 +1395,10 @@ class TimeDecayYieldStrategy:
             and self.target_min_price <= snapshot.yes_ask <= self.target_max_price
             and max(history) - min(history) <= self.max_volatility
             and self._orders.get(key, 0) < self.max_orders_per_market
+            and key not in self._positions
         ):
             self._orders[key] = self._orders.get(key, 0) + 1
+            self._positions[key] = snapshot.yes_ask
             self._counter += 1
             yield OrderIntent(
                 timestamp_ms=snapshot.timestamp_ms,

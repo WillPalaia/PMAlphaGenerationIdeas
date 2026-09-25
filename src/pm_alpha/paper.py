@@ -358,10 +358,12 @@ class PaperRunner:
                     if not self._is_allowed(intent):
                         logger.warning("Rejected paper intent %s by risk limits", intent.client_order_id)
                         continue
-                    self._market_exposure[(intent.venue, intent.market_id)] = (
-                        self._market_exposure.get((intent.venue, intent.market_id), 0.0)
-                        + intent.quantity * intent.limit_price
-                    )
+                    key = (intent.venue, intent.market_id)
+                    notional = intent.quantity * intent.limit_price
+                    if intent.side is Side.BUY:
+                        self._market_exposure[key] = self._market_exposure.get(key, 0.0) + notional
+                    else:
+                        self._market_exposure[key] = max(0.0, self._market_exposure.get(key, 0.0) - notional)
                     if self.portfolio is not None:
                         self.portfolio.submit(intent, snapshot)
                     if self.on_intent is not None:
@@ -372,6 +374,8 @@ class PaperRunner:
                 pass
 
     def _is_allowed(self, intent: OrderIntent) -> bool:
+        if intent.side is Side.SELL:
+            return True
         notional = intent.quantity * intent.limit_price
         exposure = self._market_exposure.get((intent.venue, intent.market_id), 0.0)
         return (

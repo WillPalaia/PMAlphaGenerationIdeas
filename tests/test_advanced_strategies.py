@@ -139,3 +139,75 @@ def test_time_decay_yield_triggers_on_stable_near_parity():
     orders = list(strategy.on_snapshot(MarketSnapshot(3, "kalshi", "m1", 0.90, 0.91, 10, 10)))
     assert len(orders) == 1
     assert orders[0].signal == "time-decay-yield"
+
+
+def test_momentum_strategy_take_profit_and_stop_loss():
+    from pm_alpha.strategies import MomentumStrategy
+    strategy = MomentumStrategy(lookback=2, minimum_move=0.03, take_profit=0.08, stop_loss=0.05)
+    # 1. Warmup
+    list(strategy.on_snapshot(MarketSnapshot(1, "kalshi", "m1", 0.49, 0.50, 10, 10)))
+    # 2. Buy on momentum
+    buys = list(strategy.on_snapshot(MarketSnapshot(2, "kalshi", "m1", 0.54, 0.55, 10, 10)))
+    assert len(buys) == 1
+    assert buys[0].side == Side.BUY
+
+    # 3. Take profit when bid jumps to 0.64 (+0.09 >= +0.08)
+    sells = list(strategy.on_snapshot(MarketSnapshot(3, "kalshi", "m1", 0.64, 0.65, 10, 10)))
+    assert len(sells) == 1
+    assert sells[0].side == Side.SELL
+    assert sells[0].signal == "momentum-take-profit"
+    assert ("kalshi", "m1") not in strategy._positions
+
+
+def test_mean_reversion_sells_when_reverting_to_mean():
+    from pm_alpha.strategies import MeanReversionStrategy
+    strategy = MeanReversionStrategy(lookback=3, deviation=0.05)
+    # History: 0.50, 0.50, 0.50 -> mean = 0.50
+    list(strategy.on_snapshot(MarketSnapshot(1, "kalshi", "m1", 0.49, 0.50, 10, 10)))
+    list(strategy.on_snapshot(MarketSnapshot(2, "kalshi", "m1", 0.49, 0.50, 10, 10)))
+    list(strategy.on_snapshot(MarketSnapshot(3, "kalshi", "m1", 0.49, 0.50, 10, 10)))
+    # Dip to 0.42 (<= 0.50 - 0.05) -> triggers buy
+    buys = list(strategy.on_snapshot(MarketSnapshot(4, "kalshi", "m1", 0.41, 0.42, 10, 10)))
+    assert len(buys) == 1
+    assert buys[0].side == Side.BUY
+
+    # Rebound to 0.50 (>= mean) -> triggers exit sell to lock in profit!
+    sells = list(strategy.on_snapshot(MarketSnapshot(5, "kalshi", "m1", 0.50, 0.51, 10, 10)))
+    assert len(sells) == 1
+    assert sells[0].side == Side.SELL
+    assert sells[0].signal == "mean-reverted-exit"
+    assert ("kalshi", "m1") not in strategy._positions
+
+
+def test_favorite_yield_harvests_at_near_parity():
+    strategy = FavoriteYieldStrategy(min_probability=0.85, max_probability=0.95, lookback=2)
+    list(strategy.on_snapshot(MarketSnapshot(1, "kalshi", "m1", 0.89, 0.90, 10, 10)))
+    buys = list(strategy.on_snapshot(MarketSnapshot(2, "kalshi", "m1", 0.89, 0.90, 10, 10)))
+    assert len(buys) == 1
+    assert buys[0].side == Side.BUY
+
+    # Price approaches 0.97 -> harvest yield early and sell!
+    sells = list(strategy.on_snapshot(MarketSnapshot(3, "kalshi", "m1", 0.97, 0.98, 10, 10)))
+    assert len(sells) == 1
+    assert sells[0].side == Side.SELL
+    assert sells[0].signal == "favorite-yield-harvested"
+    assert ("kalshi", "m1") not in strategy._positions
+
+
+def test_ema_crossover_sells_on_death_cross():
+    strategy = EmaCrossoverStrategy(fast_span=2, slow_span=5, min_cross_diff=0.01)
+    # Warmup
+    for t in range(1, 4):
+        list(strategy.on_snapshot(MarketSnapshot(t, "kalshi", "m1", 0.45, 0.46, 10, 10)))
+    # Golden cross buy
+    buys = list(strategy.on_snapshot(MarketSnapshot(4, "kalshi", "m1", 0.55, 0.56, 10, 10)))
+    assert len(buys) == 1
+    assert buys[0].side == Side.BUY
+
+    # Sharp reversal -> death cross triggers sell
+    sells = list(strategy.on_snapshot(MarketSnapshot(5, "kalshi", "m1", 0.39, 0.40, 10, 10)))
+    assert len(sells) == 1
+    assert sells[0].side == Side.SELL
+    assert sells[0].signal == "ema-death-cross-exit"
+    assert ("kalshi", "m1") not in strategy._positions
+
