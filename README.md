@@ -36,6 +36,46 @@ requires an authorized reference feed and manual contract-rule verification.
 The collector backs off on Kalshi rate limits, limits concurrent requests, and
 skips an individual unavailable ticker without stopping the service.
 
+## Live-data paper trading
+
+The same Oracle process now runs four no-money strategies against each fetched
+snapshot:
+
+- threshold buying
+- momentum
+- mean reversion
+- stable high probability (the 68–72 cent stability proxy)
+
+Orders are simulated locally against the observed top-of-book only. The
+portfolio records `paper_orders`, `paper_fills`, `paper_positions`, and
+`paper_equity` in the same SQLite database. It never calls a Kalshi order
+endpoint. The service log should contain:
+
+```text
+PAPER MODE ONLY: intents are simulated against snapshots; no live orders are sent
+```
+
+The live paper balance defaults to $100 with a 1% research fee assumption.
+This is an execution simulation, not a guarantee of fills: it does not model
+queue position, hidden liquidity, or exchange acknowledgement latency. Check
+the current paper activity over SSH:
+
+```bash
+sudo python3 - <<'PY'
+import sqlite3
+c = sqlite3.connect("/var/lib/pm-alpha/market_data.sqlite")
+for table in ("paper_orders", "paper_fills", "paper_positions", "paper_equity"):
+    print(table, c.execute("select count(*) from " + table).fetchone()[0])
+print(c.execute(
+    "select signal, status, count(*) from paper_orders group by signal, status"
+).fetchall())
+print(c.execute(
+    "select timestamp_ms, cash, positions_value, equity, fees "
+    "from paper_equity order by id desc limit 1"
+).fetchone())
+PY
+```
+
 ## External-reference market-making research
 
 Reference prices must be exported from an authorized sportsbook or venue feed
