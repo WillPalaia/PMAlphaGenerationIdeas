@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from .models import MarketSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 class KalshiPublicSource:
@@ -21,6 +24,7 @@ class KalshiPublicSource:
             raise ValueError("at least one market ticker is required")
         self.market_tickers = tuple(market_tickers)
         self.base_url = base_url.rstrip("/")
+        self._semaphore = asyncio.Semaphore(2)
 
     def set_market_tickers(self, market_tickers: list[str]) -> None:
         if not market_tickers:
@@ -28,9 +32,16 @@ class KalshiPublicSource:
         self.market_tickers = tuple(dict.fromkeys(market_tickers))
 
     async def snapshots(self) -> list[MarketSnapshot]:
-        return await asyncio.gather(
-            *(asyncio.to_thread(self._fetch, ticker) for ticker in self.market_tickers)
-        )
+        async def fetch_one(ticker: str) -> MarketSnapshot | None:
+            async with self._semaphore:
+                try:
+                    return await asyncio.to_thread(self._fetch, ticker)
+                except (HTTPError, OSError, ValueError) as exc:
+                    logger.warning("Skipping Kalshi ticker %s: %s", ticker, exc)
+                    return None
+
+        results = await asyncio.gather(*(fetch_one(ticker) for ticker in self.market_tickers))
+        return [snapshot for snapshot in results if snapshot is not None]
 
     def _fetch(self, ticker: str) -> MarketSnapshot:
         request = Request(
