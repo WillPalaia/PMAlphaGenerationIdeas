@@ -9,7 +9,7 @@ User=pmalpha
 Group=pmalpha
 WorkingDirectory=/opt/pm-alpha
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/pm-alpha/.venv/bin/python /opt/pm-alpha/run_kalshi_paper.py --db /var/lib/pm-alpha/market_data.sqlite --interval 1 REPLACE_WITH_TICKER
+ExecStart=/opt/pm-alpha/.venv/bin/python /opt/pm-alpha/run_kalshi_paper.py --db /var/lib/pm-alpha/market_data.sqlite --interval 10 --discover
 Restart=always
 RestartSec=10
 NoNewPrivileges=true

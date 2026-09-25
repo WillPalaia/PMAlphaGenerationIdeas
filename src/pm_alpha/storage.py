@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     quantity REAL NOT NULL,
     limit_price REAL NOT NULL,
     signal TEXT NOT NULL,
+    strategy TEXT,
     status TEXT NOT NULL,
     filled_quantity REAL NOT NULL DEFAULT 0,
     reject_reason TEXT
@@ -64,6 +65,17 @@ CREATE TABLE IF NOT EXISTS paper_equity (
     equity REAL NOT NULL,
     fees REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS paper_strategy_equity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp_ms INTEGER NOT NULL,
+    strategy TEXT NOT NULL,
+    cash REAL NOT NULL,
+    positions_value REAL NOT NULL,
+    equity REAL NOT NULL,
+    fees REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_equity
+    ON paper_strategy_equity (strategy, timestamp_ms);
 """
 
 
@@ -75,6 +87,12 @@ class SnapshotStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            columns = [row[1] for row in connection.execute("PRAGMA table_info(paper_orders)").fetchall()]
+            if "strategy" not in columns:
+                try:
+                    connection.execute("ALTER TABLE paper_orders ADD COLUMN strategy TEXT")
+                except Exception:
+                    pass
 
     def append(self, snapshot: MarketSnapshot) -> bool:
         with self._connect() as connection:
@@ -131,9 +149,12 @@ class SnapshotStore:
         market_id: str,
         start_ms: int | None = None,
         end_ms: int | None = None,
+        quoted_only: bool = False,
     ) -> list[MarketSnapshot]:
         clauses = ["venue = ?", "market_id = ?"]
         values: list[object] = [venue, market_id]
+        if quoted_only:
+            clauses.append("(yes_bid IS NOT NULL OR yes_ask IS NOT NULL OR resolved = 1)")
         if start_ms is not None:
             clauses.append("timestamp_ms >= ?")
             values.append(start_ms)
@@ -164,13 +185,14 @@ class SnapshotStore:
             for row in rows
         ]
 
-    def markets(self) -> list[tuple[str, str]]:
+    def markets(self, quoted_only: bool = False) -> list[tuple[str, str]]:
         """Return distinct venue/market pairs available for batch research."""
         with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT DISTINCT venue, market_id FROM market_snapshots "
-                "ORDER BY venue, market_id"
-            ).fetchall()
+            query = "SELECT DISTINCT venue, market_id FROM market_snapshots "
+            if quoted_only:
+                query += "WHERE (yes_bid IS NOT NULL OR yes_ask IS NOT NULL OR resolved = 1) "
+            query += "ORDER BY venue, market_id"
+            rows = connection.execute(query).fetchall()
         return [(row[0], row[1]) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:

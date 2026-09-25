@@ -17,8 +17,8 @@ class MarketSnapshot:
     timestamp_ms: int
     venue: str
     market_id: str
-    yes_bid: Optional[float]
-    yes_ask: Optional[float]
+    yes_bid: Optional[float] = None
+    yes_ask: Optional[float] = None
     bid_size: float = 0.0
     ask_size: float = 0.0
     resolved: bool = False
@@ -55,6 +55,7 @@ class OrderIntent:
     client_order_id: str
     signal: str = ""
     max_latency_ms: int = 0
+    strategy: str = ""
 
     def __post_init__(self) -> None:
         if self.timestamp_ms < 0 or self.max_latency_ms < 0:

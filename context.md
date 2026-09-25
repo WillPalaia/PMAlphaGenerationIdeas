@@ -320,8 +320,9 @@ can erase many small wins.
 ### Complementary YES/NO arbitrage
 
 `find_complement_opportunity` checks whether buying YES and NO together costs
-less than the guaranteed $1 payout after fees. `paired.py` stress-tests
-non-atomic leg execution.
+less than the guaranteed $1 payout after fees. `ComplementArbitrageStrategy`
+automates detection of locked books (`yes_bid == yes_ask`) and cross-outcome
+Dutch book violations.
 
 Risk: one leg can fill while the other fails, books can move, fees can erase a
 small edge, and opportunities may be rare.
@@ -343,6 +344,81 @@ Risk: false contract equivalence, sportsbook vig, stale references, queue
 position, adverse selection, inventory accumulation, and cancellation latency.
 The current simulator does not prove that a displayed spread is executable.
 
+### Favorite-longshot yield harvesting
+
+`FavoriteYieldStrategy` targets contracts trading in a high-confidence probability
+zone (default 0.85–0.96) that exhibit price stability (range <= 0.04 over lookback).
+Prediction markets systematically underprice heavy favorites because retail
+traders prefer lottery-style longshots.
+
+Risk: high win-rate strategy with fat-tail loss risk if a heavy favorite suffers
+an unforeseen upset.
+
+### Order book depth imbalance (microstructure alpha)
+
+`OrderBookImbalanceStrategy` calculates order book imbalance:
+`OBI = (bid_size - ask_size) / (bid_size + ask_size)`. When OBI >= +0.50 (bid depth
+at least 3x ask depth) and spread <= 0.05, enters before queue pressure lifts the ask.
+
+Risk: adverse selection, spoofed or rapidly canceled orders in illiquid books.
+
+### Bollinger Band adaptive mean reversion
+
+`BollingerReversionStrategy` calculates rolling mean and standard deviation:
+`z = (price - mean) / std`. Buys when oversold (`z <= -2.0`) and emits exit sells
+when price reverts to or above the mean (`z >= 0.0`), locking in realized P&L.
+
+Risk: trending markets after news events can continue falling beyond 3+ standard
+deviations (regime shift).
+
+### Range / Donchian breakout
+
+`RangeBreakoutStrategy` tracks the highest high over a lookback window (default 20).
+When price breaks above `channel_high + breakout_margin` with ask depth, it enters
+to ride the information discovery wave towards resolution.
+
+Risk: false breakouts in choppy, range-bound markets.
+
+### Dual EMA trend crossover
+
+`EmaCrossoverStrategy` smooths single-tick quote jitter using fast (e.g. 5-period)
+and slow (e.g. 20-period) exponential moving averages. Enters on verified golden crosses
+when separation >= `min_cross_diff`.
+
+Risk: lag in fast-moving prediction markets; whipsaws in flat ranges.
+
+### Autonomous spread harvesting market maker
+
+`SpreadHarvestingMarketMaker` exploits wide prediction market spreads (>= 0.04)
+using an Avellaneda-Stoikov inventory skew model:
+`reservation = micro_price - inventory * skew`.
+Buys when ask is attractive and sells when holding positive inventory and bid is
+attractive, capturing the spread.
+
+Risk: inventory accumulation during one-sided market trends (toxic flow).
+
+### VWAP pullback
+
+`VwapPullbackStrategy` tracks volume-weighted average price. In a sustained macro
+uptrend, temporary liquidity voids often cause dips below VWAP. Enters on the dip
+at a favorable execution discount.
+
+Risk: temporary dip turns into an information-driven downward trend.
+
+### Information velocity / jump following
+
+`JumpFollowingStrategy` detects sharp, discontinuous price jumps (>= 0.06 within
+3 ticks), entering immediately to capture post-announcement drift before broader
+liquidity re-prices.
+
+Risk: chasing temporary fat-finger spikes that immediately retrace.
+
+### Time-decay / theta yield
+
+`TimeDecayYieldStrategy` targets contracts with high probability (0.80–0.95) that
+have consolidated with low volatility, capturing the final convergence discount
+to $1.00 as expiration approaches.
+
 ### Dynamic market discovery
 
 `KalshiMarketDiscovery` is infrastructure, not alpha. It finds ordinary binary
@@ -351,7 +427,7 @@ inactivity rather than mispricing and may make fills impossible.
 
 ## What has been backtested
 
-Automated validation currently has 27 passing tests. Tests cover:
+Automated validation currently has 38 passing tests. Tests cover:
 
 - Event-driven replay.
 - Latency and same-snapshot fill rules.
@@ -363,9 +439,11 @@ Automated validation currently has 27 passing tests. Tests cover:
 - Historical CSV/candlestick parsing.
 - Kalshi old and current order-book schemas.
 - SQLite storage and diagnostics.
-- Strategy baselines and sweeps.
+- Strategy baselines and extended sweeps (9,990 experiments across 111 markets).
 - Market-making fills, fees, inventory, and adverse-selection inputs.
 - Persistent paper portfolio fills, positions, equity, and multi-strategy fanout.
+- All 10 new quantitative prediction market strategies with unit test coverage.
+- Per-strategy attribution tracking and isolated sub-portfolios in SQLite.
 
 Code compilation and `git diff --check` have also passed during the latest
 implementation cycles.

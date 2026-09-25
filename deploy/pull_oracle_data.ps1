@@ -1,8 +1,6 @@
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$SshKey,
-    [Parameter(Mandatory = $true)]
-    [string]$OracleHost,
+    [string]$SshKey = "C:\Users\Will Palaia\Downloads\oracle cloud\Prediction Market Alpha Generation Ideas.key",
+    [string]$OracleHost = "157.151.132.129",
     [string]$RemoteUser = "ubuntu",
     [string]$Output = "data\oracle_market_data.sqlite",
     [switch]$RunAnalysis

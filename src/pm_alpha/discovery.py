@@ -71,3 +71,42 @@ class KalshiMarketDiscovery:
             if not cursor:
                 break
         return results
+
+    async def check_settlements(self, tickers: list[str]) -> list[tuple[str, bool]]:
+        """Check settlement status for a list of tickers.
+
+        Returns a list of (ticker, settlement_yes: bool) for any markets that
+        have determined/finalized with a definitive 'yes' or 'no' result.
+        """
+        if not tickers:
+            return []
+        return await asyncio.to_thread(self._check_settlements, tickers)
+
+    def _check_settlements(self, tickers: list[str]) -> list[tuple[str, bool]]:
+        resolved: list[tuple[str, bool]] = []
+        batch_size = 50
+        for i in range(0, len(tickers), batch_size):
+            batch = tickers[i : i + batch_size]
+            url = f"{self.base_url}/markets?tickers={','.join(batch)}"
+            request = Request(url, headers={"User-Agent": "pm-alpha-paper/0.1"})
+            payload = {}
+            for attempt in range(4):
+                try:
+                    with urlopen(request, timeout=15) as response:
+                        payload = json.load(response)
+                    break
+                except HTTPError as exc:
+                    if exc.code not in {429, 500, 502, 503, 504} or attempt == 3:
+                        break
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    delay = float(retry_after) if retry_after else 2.0 ** attempt
+                    time.sleep(min(delay, 30.0))
+                except OSError:
+                    break
+            for market in payload.get("markets", []):
+                ticker = market.get("ticker", "")
+                status = str(market.get("status", "")).lower()
+                result = str(market.get("result", "")).lower()
+                if status in {"determined", "finalized", "settled"} or result in {"yes", "no"}:
+                    resolved.append((ticker, result == "yes"))
+        return resolved

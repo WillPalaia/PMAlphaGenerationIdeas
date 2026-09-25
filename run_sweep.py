@@ -14,6 +14,7 @@ def main() -> None:
     parser.add_argument("csv_files", nargs="*")
     parser.add_argument("--sqlite")
     parser.add_argument("--output", default="data/sweep.csv")
+    parser.add_argument("--baselines-only", action="store_true", help="Run only the 4 baseline strategies")
     args = parser.parse_args()
 
     markets = {}
@@ -21,8 +22,8 @@ def main() -> None:
         parser.error("provide either CSV files or --sqlite, but not both")
     if args.sqlite:
         store = SnapshotStore(args.sqlite)
-        for venue, market_id in store.markets():
-            snapshots = store.load(venue, market_id)
+        for venue, market_id in store.markets(quoted_only=True):
+            snapshots = store.load(venue, market_id, quoted_only=True)
             if snapshots:
                 markets[f"{venue}:{market_id}"] = snapshots
     else:
@@ -33,7 +34,7 @@ def main() -> None:
             markets[Path(file_name).stem] = snapshots
     if not markets:
         raise ValueError("no markets found in input")
-    rows = run_sweep(markets)
+    rows = run_sweep(markets, include_advanced=not args.baselines_only)
     write_csv(rows, args.output)
     print(json.dumps({
         "markets": len(markets),

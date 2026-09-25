@@ -38,42 +38,44 @@ skips an individual unavailable ticker without stopping the service.
 
 ## Live-data paper trading
 
-The same Oracle process now runs four no-money strategies against each fetched
-snapshot:
+The Oracle process runs 14 quantitative no-money strategies concurrently
+against each fetched snapshot:
 
-- threshold buying
-- momentum
-- mean reversion
-- stable high probability (the 68–72 cent stability proxy)
+1. **Threshold Buying** (`threshold`): baseline buying below fixed probability.
+2. **Momentum** (`momentum`): lagged directional velocity following.
+3. **Mean Reversion** (`mean-reversion`): buys below lagged rolling mean.
+4. **Stable High Probability** (`stable-high-probability`): 68–72 cent low-drama proxy.
+5. **Favorite Yield** (`favorite-yield`): exploits favorite-longshot bias (85–96 cent stability).
+6. **Order Book Imbalance** (`orderbook-imbalance`): microstructure queue imbalance alpha ($OBI \ge +0.5$).
+7. **Bollinger Reversion** (`bollinger-reversion`): adaptive volatility Z-score oversold buy ($z \le -2.0$) & exit sell.
+8. **Range Breakout** (`range-breakout`): Donchian channel post-announcement drift breakout.
+9. **EMA Crossover** (`ema-crossover`): fast/slow EMA golden cross trend confirmation.
+10. **Spread Harvesting** (`spread-harvesting`): inventory-skewed passive/semi-passive market making.
+11. **Complement Arbitrage** (`complement-arbitrage`): locked-book and Dutch book mispricing arbitrage.
+12. **VWAP Pullback** (`vwap-pullback`): volume-weighted average price pullback buying in macro uptrends.
+13. **Jump Following** (`jump-following`): information shock velocity following on price jumps.
+14. **Time Decay Yield** (`time-decay-yield`): theta harvesting near expiration on high-confidence outcomes.
 
 Orders are simulated locally against the observed top-of-book only. The
-portfolio records `paper_orders`, `paper_fills`, `paper_positions`, and
-`paper_equity` in the same SQLite database. It never calls a Kalshi order
-endpoint. The service log should contain:
+portfolio records `paper_orders` (with strategy attribution), `paper_fills`,
+`paper_positions`, `paper_equity`, and isolated `paper_strategy_equity` in SQLite.
+It never calls a Kalshi order endpoint. The service log confirms:
 
 ```text
-PAPER MODE ONLY: intents are simulated against snapshots; no live orders are sent
+PAPER MODE ONLY: Running 14 paper strategies concurrently against snapshots; no live orders are sent
 ```
 
 The live paper balance defaults to $100 with a 1% research fee assumption.
-This is an execution simulation, not a guarantee of fills: it does not model
-queue position, hidden liquidity, or exchange acknowledgement latency. Check
-the current paper activity over SSH:
+Check live performance locally or from a downloaded DB:
 
-```bash
-sudo python3 - <<'PY'
-import sqlite3
-c = sqlite3.connect("/var/lib/pm-alpha/market_data.sqlite")
-for table in ("paper_orders", "paper_fills", "paper_positions", "paper_equity"):
-    print(table, c.execute("select count(*) from " + table).fetchone()[0])
-print(c.execute(
-    "select signal, status, count(*) from paper_orders group by signal, status"
-).fetchall())
-print(c.execute(
-    "select timestamp_ms, cash, positions_value, equity, fees "
-    "from paper_equity order by id desc limit 1"
-).fetchone())
-PY
+```powershell
+python report_paper_performance.py data\oracle_latest.sqlite
+```
+
+Check live status directly on the Oracle VM with one command:
+
+```powershell
+.\deploy\status_oracle.ps1
 ```
 
 ## External-reference market-making research
@@ -229,7 +231,33 @@ collectors. If authenticated Kalshi features are added later, keep the key ID
 and private key in an ignored local `.env`/file path. Never paste private keys
 into chat, commit them, or enable live trading merely to run research.
 
-## Oracle deployment
+## Oracle deployment & operations
 
-See [deploy/README.md](deploy/README.md) for an Ubuntu systemd deployment that
-continues collecting public market data when your local computer is offline.
+You can manage the Oracle VM and paper trading using either **double-clickable `.bat` files in Windows Explorer** or via the **PowerShell scripts**:
+
+### Option A: Double-Click Batch Files (Easiest in Windows Explorer)
+Simply double-click any of these `.bat` files in the repository root (or in `deploy\`):
+- **`check_oracle_status.bat`**: Shows live VM service status, snapshot & quote counts, cash/equity, strategy orders, open positions, and journald logs.
+- **`pull_oracle_data.bat`**: Downloads the latest paper-trading SQLite database to `data\oracle_latest.sqlite` and immediately displays the strategy attribution and P&L report.
+- **`run_performance_report.bat`**: Generates the offline performance & strategy attribution leaderboard from the downloaded SQLite data.
+- **`sync_to_oracle.bat`**: Runs local unit tests, packages the codebase, uploads to the Oracle VM, and restarts the service.
+
+*(These batch files automatically bypass PowerShell script execution restrictions and keep the command window open so you can read the results).*
+
+### Option B: PowerShell Scripts (Terminal or Right-Click)
+*Why double-clicking `.ps1` doesn't work*: By default, Windows associates `.ps1` files with Notepad for security, and restricts running unsigned scripts.
+
+1. **Right-Click**: In Windows Explorer, right-click any `.ps1` file and choose **"Run with PowerShell"**.
+2. **Terminal**: In PowerShell or VS Code terminal, run:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\deploy\status_oracle.ps1
+   powershell -ExecutionPolicy Bypass -File .\deploy\pull_oracle_data.ps1
+   powershell -ExecutionPolicy Bypass -File .\deploy\sync_to_oracle.ps1
+   ```
+   Or allow local scripts once for your user account:
+   ```powershell
+   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+   .\deploy\status_oracle.ps1
+   ```
+
+See [deploy/README.md](deploy/README.md) for initial Ubuntu systemd installation instructions.

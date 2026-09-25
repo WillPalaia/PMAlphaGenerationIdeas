@@ -30,3 +30,27 @@ def test_discovery_excludes_multivariate_markets():
         urlopen.return_value = Response()
         markets = KalshiMarketDiscovery()._discover(10)
     assert [market.ticker for market in markets] == ["KXGAME-1"]
+
+
+def test_check_settlements():
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    payload = {
+        "markets": [
+            {"ticker": "KX-ACTIVE", "status": "active", "result": ""},
+            {"ticker": "KX-WON", "status": "finalized", "result": "yes"},
+            {"ticker": "KX-LOST", "status": "determined", "result": "no"},
+        ]
+    }
+    with patch("pm_alpha.discovery.urlopen") as urlopen, patch(
+        "pm_alpha.discovery.json.load", return_value=payload
+    ):
+        urlopen.return_value = Response()
+        settled = KalshiMarketDiscovery()._check_settlements(["KX-ACTIVE", "KX-WON", "KX-LOST"])
+    assert settled == [("KX-WON", True), ("KX-LOST", False)]
+

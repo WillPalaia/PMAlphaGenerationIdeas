@@ -10,10 +10,20 @@ from .backtest import BacktestConfig, EventDrivenBacktester, Strategy
 from .metrics import summarize
 from .models import MarketSnapshot
 from .strategies import (
+    BollingerReversionStrategy,
     BuyBelowThreshold,
+    ComplementArbitrageStrategy,
+    EmaCrossoverStrategy,
+    FavoriteYieldStrategy,
+    JumpFollowingStrategy,
     MeanReversionStrategy,
     MomentumStrategy,
+    OrderBookImbalanceStrategy,
+    RangeBreakoutStrategy,
+    SpreadHarvestingMarketMaker,
     StableHighProbabilityStrategy,
+    TimeDecayYieldStrategy,
+    VwapPullbackStrategy,
 )
 
 
@@ -36,6 +46,7 @@ def run_sweep(
     *,
     fee_rates: Iterable[float] = (0.0, 0.01, 0.02),
     starting_cash: float = 1_000.0,
+    include_advanced: bool = False,
 ) -> tuple[SweepRow, ...]:
     """Run predeclared baseline grids independently on each market."""
 
@@ -54,6 +65,84 @@ def run_sweep(
                 lambda lower=band[0], upper=band[1]: StableHighProbabilityStrategy(
                     lower_price=lower, upper_price=upper
                 ),
+            )
+        )
+
+    if include_advanced:
+        for min_p, max_p in ((0.80, 0.95), (0.85, 0.96)):
+            factories.append(
+                (
+                    "favorite_yield",
+                    json.dumps({"min_prob": min_p, "max_prob": max_p}),
+                    lambda mi=min_p, ma=max_p: FavoriteYieldStrategy(min_probability=mi, max_probability=ma),
+                )
+            )
+        for threshold in (0.40, 0.60):
+            factories.append(
+                (
+                    "orderbook_imbalance",
+                    json.dumps({"threshold": threshold}),
+                    lambda th=threshold: OrderBookImbalanceStrategy(imbalance_threshold=th),
+                )
+            )
+        for z in (-1.5, -2.0):
+            factories.append(
+                (
+                    "bollinger_reversion",
+                    json.dumps({"entry_z": z}),
+                    lambda ez=z: BollingerReversionStrategy(entry_z=ez),
+                )
+            )
+        for margin in (0.02, 0.04):
+            factories.append(
+                (
+                    "range_breakout",
+                    json.dumps({"margin": margin}),
+                    lambda mg=margin: RangeBreakoutStrategy(breakout_margin=mg),
+                )
+            )
+        for min_diff in (0.01, 0.02):
+            factories.append(
+                (
+                    "ema_crossover",
+                    json.dumps({"min_cross_diff": min_diff}),
+                    lambda md=min_diff: EmaCrossoverStrategy(min_cross_diff=md),
+                )
+            )
+        factories.append(
+            (
+                "spread_harvesting",
+                json.dumps({"min_spread": 0.04}),
+                lambda: SpreadHarvestingMarketMaker(min_spread=0.04),
+            )
+        )
+        factories.append(
+            (
+                "complement_arbitrage",
+                "{}",
+                lambda: ComplementArbitrageStrategy(),
+            )
+        )
+        factories.append(
+            (
+                "vwap_pullback",
+                json.dumps({"pullback": 0.02}),
+                lambda: VwapPullbackStrategy(pullback_threshold=0.02),
+            )
+        )
+        for jump in (0.05, 0.08):
+            factories.append(
+                (
+                    "jump_following",
+                    json.dumps({"jump": jump}),
+                    lambda j=jump: JumpFollowingStrategy(jump_threshold=j),
+                )
+            )
+        factories.append(
+            (
+                "time_decay_yield",
+                json.dumps({"min_p": 0.80, "max_p": 0.95}),
+                lambda: TimeDecayYieldStrategy(target_min_price=0.80, target_max_price=0.95),
             )
         )
 

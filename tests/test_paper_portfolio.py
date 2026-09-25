@@ -41,3 +41,30 @@ def test_multi_strategy_combines_intents():
     assert len(MultiStrategy({"a": Strategy(), "b": Strategy()}).on_snapshot(
         MarketSnapshot(1, "v", "m", 0.4, 0.5, 1, 1)
     )) == 2
+
+
+def test_portfolio_tracks_per_strategy_attribution(tmp_path):
+    store = SnapshotStore(tmp_path / "paper.sqlite")
+    portfolio = PaperPortfolio(store, starting_cash=100.0, fee_rate=0.01)
+    snapshot = MarketSnapshot(1, "kalshi", "m1", 0.40, 0.50, 10, 10)
+
+    intent_a = OrderIntent(1, "kalshi", "m1", Side.BUY, 2, 0.50, "order-a", strategy="strat-alpha")
+    intent_b = OrderIntent(1, "kalshi", "m1", Side.BUY, 1, 0.50, "order-b", strategy="strat-beta")
+
+    assert portfolio.submit(intent_a, snapshot) is True
+    assert portfolio.submit(intent_b, snapshot) is True
+
+    # Check that strategy states exist and are tracked independently
+    assert "strat-alpha" in portfolio.strategy_states
+    assert "strat-beta" in portfolio.strategy_states
+    assert portfolio.strategy_states["strat-alpha"].positions[("kalshi", "m1")].quantity == 2
+    assert portfolio.strategy_states["strat-beta"].positions[("kalshi", "m1")].quantity == 1
+
+    # Check persistence in SQLite
+    with store.connection() as conn:
+        orders = [tuple(r) for r in conn.execute("SELECT strategy, status, filled_quantity FROM paper_orders ORDER BY client_order_id").fetchall()]
+        assert orders == [("strat-alpha", "filled", 2.0), ("strat-beta", "filled", 1.0)]
+        strategy_equity = [tuple(r) for r in conn.execute("SELECT strategy, equity FROM paper_strategy_equity ORDER BY id").fetchall()]
+        assert len(strategy_equity) == 2
+        assert strategy_equity[0][0] == "strat-alpha"
+        assert strategy_equity[1][0] == "strat-beta"
