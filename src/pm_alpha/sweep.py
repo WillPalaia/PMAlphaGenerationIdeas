@@ -9,7 +9,12 @@ from typing import Callable, Iterable
 from .backtest import BacktestConfig, EventDrivenBacktester, Strategy
 from .metrics import summarize
 from .models import MarketSnapshot
-from .strategies import BuyBelowThreshold, MeanReversionStrategy, MomentumStrategy
+from .strategies import (
+    BuyBelowThreshold,
+    MeanReversionStrategy,
+    MomentumStrategy,
+    StableHighProbabilityStrategy,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,16 @@ def run_sweep(
         factories.append(("momentum", json.dumps({"minimum_move": move}), lambda m=move: MomentumStrategy(minimum_move=m)))
     for deviation in (0.03, 0.05, 0.10):
         factories.append(("mean_reversion", json.dumps({"deviation": deviation}), lambda d=deviation: MeanReversionStrategy(deviation=d)))
+    for band in ((0.65, 0.75), (0.68, 0.72), (0.70, 0.80)):
+        factories.append(
+            (
+                "stable_high_probability",
+                json.dumps({"lower_price": band[0], "upper_price": band[1]}),
+                lambda lower=band[0], upper=band[1]: StableHighProbabilityStrategy(
+                    lower_price=lower, upper_price=upper
+                ),
+            )
+        )
 
     rows: list[SweepRow] = []
     for market_id, raw_snapshots in markets.items():

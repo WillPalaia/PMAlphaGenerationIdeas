@@ -8,5 +8,10 @@ def test_sweep_runs_independent_strategy_grid():
         for i in range(5)
     ]
     rows = run_sweep({"m1": snapshots}, fee_rates=(0.0, 0.01))
-    assert len(rows) == 11 * 2
-    assert {row.strategy for row in rows} == {"threshold", "momentum", "mean_reversion"}
+    assert len(rows) == 14 * 2
+    assert {row.strategy for row in rows} == {
+        "threshold",
+        "momentum",
+        "mean_reversion",
+        "stable_high_probability",
+    }

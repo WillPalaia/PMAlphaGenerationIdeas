@@ -21,6 +21,7 @@ from .market_making import (
 )
 from .discovery import DiscoveredMarket, KalshiMarketDiscovery
 from .report import MarketReport, inspect_database
+from .strategies import StableHighProbabilityStrategy
 
 __all__ = [
     "BacktestResult",
@@ -58,4 +59,5 @@ __all__ = [
     "KalshiMarketDiscovery",
     "MarketReport",
     "inspect_database",
+    "StableHighProbabilityStrategy",
 ]

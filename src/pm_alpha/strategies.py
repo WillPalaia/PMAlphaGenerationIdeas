@@ -170,3 +170,62 @@ class MeanReversionStrategy:
         history.append(snapshot.yes_ask)
         if len(history) > self.lookback:
             del history[0]
+
+
+class StableHighProbabilityStrategy:
+    """Proxy for long-dated, low-drama contracts near a target probability.
+
+    Snapshot data does not include contract expiry, so the strategy deliberately
+    does not claim to identify a one-month horizon. Callers must filter markets
+    by expiry metadata before replaying this strategy.
+    """
+
+    def __init__(
+        self,
+        lower_price: float = 0.68,
+        upper_price: float = 0.72,
+        lookback: int = 5,
+        max_range: float = 0.03,
+        quantity: float = 1.0,
+        max_orders_per_market: int = 1,
+    ):
+        if not 0 < lower_price <= upper_price <= 1:
+            raise ValueError("invalid probability band")
+        if lookback <= 0 or max_range < 0 or quantity <= 0 or max_orders_per_market <= 0:
+            raise ValueError("invalid stable-probability parameters")
+        self.lower_price = lower_price
+        self.upper_price = upper_price
+        self.lookback = lookback
+        self.max_range = max_range
+        self.quantity = quantity
+        self.max_orders_per_market = max_orders_per_market
+        self._history: dict[tuple[str, str], list[float]] = {}
+        self._orders: dict[tuple[str, str], int] = {}
+        self._counter = 0
+
+    def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        if snapshot.yes_ask is None:
+            return
+        key = (snapshot.venue, snapshot.market_id)
+        history = self._history.setdefault(key, [])
+        history.append(snapshot.yes_ask)
+        if len(history) > self.lookback:
+            del history[0]
+        if (
+            len(history) == self.lookback
+            and self.lower_price <= snapshot.yes_ask <= self.upper_price
+            and max(history) - min(history) <= self.max_range
+            and self._orders.get(key, 0) < self.max_orders_per_market
+        ):
+            self._orders[key] = self._orders.get(key, 0) + 1
+            self._counter += 1
+            yield OrderIntent(
+                timestamp_ms=snapshot.timestamp_ms,
+                venue=snapshot.venue,
+                market_id=snapshot.market_id,
+                side=Side.BUY,
+                quantity=self.quantity,
+                limit_price=snapshot.yes_ask,
+                client_order_id=f"stable-probability-{self._counter}",
+                signal="stable-high-probability",
+            )

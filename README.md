@@ -133,6 +133,13 @@ live-trading recommendation. A high return on one market or one fee setting is
 not sufficient; require performance across markets, chronological holdouts,
 and execution-grade paper data.
 
+The sweep also includes `stable_high_probability`, a proxy for the proposed
+"boring event around 70 cents" idea. It buys once after several consecutive
+observations remain in a narrow probability band. Because the normalized
+snapshot schema does not contain market expiry, this is not yet a true
+one-month strategy: expiry filtering must be supplied from Kalshi market
+metadata before its results can be interpreted as long-dated behavior.
+
 ## Development
 
 ```powershell
