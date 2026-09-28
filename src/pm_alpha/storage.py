@@ -57,6 +57,16 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     settled INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (venue, market_id)
 );
+CREATE TABLE IF NOT EXISTS paper_strategy_positions (
+    strategy TEXT NOT NULL,
+    venue TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    average_cost REAL NOT NULL,
+    realized_pnl REAL NOT NULL DEFAULT 0,
+    settled INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (strategy, venue, market_id)
+);
 CREATE TABLE IF NOT EXISTS paper_equity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp_ms INTEGER NOT NULL,

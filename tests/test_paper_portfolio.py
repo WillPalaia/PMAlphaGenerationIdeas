@@ -68,3 +68,34 @@ def test_portfolio_tracks_per_strategy_attribution(tmp_path):
         assert len(strategy_equity) == 2
         assert strategy_equity[0][0] == "strat-alpha"
         assert strategy_equity[1][0] == "strat-beta"
+
+
+def test_isolated_strategy_sub_portfolios_cannot_cannibalize_inventory_or_cash(tmp_path):
+    store = SnapshotStore(tmp_path / "paper.sqlite")
+    portfolio = PaperPortfolio(store, starting_cash=1.50, fee_rate=0.01)
+    snapshot = MarketSnapshot(1, "kalshi", "m1", 0.40, 0.50, 10, 10)
+
+    # Strategy Alpha buys 2 contracts for 2 * $0.50 + fee = $1.01
+    intent_a = OrderIntent(1, "kalshi", "m1", Side.BUY, 2, 0.50, "a-buy-1", strategy="strat-alpha")
+    assert portfolio.submit(intent_a, snapshot) is True
+    assert portfolio.strategy_states["strat-alpha"].positions[("kalshi", "m1")].quantity == 2.0
+    assert portfolio.strategy_states["strat-alpha"].cash == pytest.approx(1.50 - 1.01)
+
+    # Strategy Beta (starts with $1.50 cash, 0 inventory) tries to sell: should be rejected for inventory!
+    intent_b_sell = OrderIntent(2, "kalshi", "m1", Side.SELL, 1, 0.40, "b-sell-1", strategy="strat-beta")
+    assert portfolio.submit(intent_b_sell, snapshot) is False
+    with store.connection() as conn:
+        reason = conn.execute("SELECT reject_reason FROM paper_orders WHERE client_order_id='b-sell-1'").fetchone()[0]
+        assert reason == "inventory"
+
+    # Strategy Alpha tries to buy 2 more ($1.01), but only has ~$0.49 cash left: rejected for insufficient-cash!
+    intent_a_buy2 = OrderIntent(3, "kalshi", "m1", Side.BUY, 2, 0.50, "a-buy-2", strategy="strat-alpha")
+    assert portfolio.submit(intent_a_buy2, snapshot) is False
+    with store.connection() as conn:
+        reason = conn.execute("SELECT reject_reason FROM paper_orders WHERE client_order_id='a-buy-2'").fetchone()[0]
+        assert reason == "insufficient-cash"
+
+    # But Strategy Beta still has its full $1.50 cash: it can buy!
+    intent_b_buy = OrderIntent(4, "kalshi", "m1", Side.BUY, 2, 0.50, "b-buy-1", strategy="strat-beta")
+    assert portfolio.submit(intent_b_buy, snapshot) is True
+    assert portfolio.strategy_states["strat-beta"].positions[("kalshi", "m1")].quantity == 2.0

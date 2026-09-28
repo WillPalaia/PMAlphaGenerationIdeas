@@ -156,9 +156,10 @@ class MomentumStrategy:
         take_profit: float = 0.25,
         stop_loss: float = 0.10,
         parity_target: float = 0.94,
+        max_spread: float = 0.08,
     ):
-        if lookback <= 0 or minimum_move < 0 or quantity <= 0:
-            raise ValueError("lookback and quantity must be positive")
+        if lookback <= 0 or minimum_move < 0 or quantity <= 0 or max_spread <= 0:
+            raise ValueError("parameters must be positive")
         self.lookback = lookback
         self.minimum_move = minimum_move
         self.quantity = quantity
@@ -166,6 +167,7 @@ class MomentumStrategy:
         self.take_profit = take_profit
         self.stop_loss = stop_loss
         self.parity_target = parity_target
+        self.max_spread = max_spread
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -178,7 +180,11 @@ class MomentumStrategy:
             self._orders[key] = 0
             return
 
-        if key in self._positions and snapshot.yes_bid is not None:
+        if snapshot.yes_ask is None or snapshot.yes_bid is None:
+            return
+        spread = snapshot.yes_ask - snapshot.yes_bid
+
+        if key in self._positions:
             entry = self._positions[key]
             if snapshot.yes_bid >= self.parity_target or snapshot.yes_bid >= entry + self.take_profit:
                 del self._positions[key]
@@ -196,7 +202,7 @@ class MomentumStrategy:
                     strategy="positive-momentum",
                 )
                 return
-            elif snapshot.yes_bid <= entry - self.stop_loss:
+            elif snapshot.yes_bid <= entry - self.stop_loss and spread <= self.max_spread:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -213,7 +219,7 @@ class MomentumStrategy:
                 )
                 return
 
-        if snapshot.yes_ask is None:
+        if spread > self.max_spread:
             return
         history = self._history.setdefault(key, [])
         if (
@@ -250,14 +256,16 @@ class MeanReversionStrategy:
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
         stop_loss: float = 0.10,
+        max_spread: float = 0.08,
     ):
-        if lookback <= 1 or deviation < 0 or quantity <= 0 or max_orders_per_market <= 0:
+        if lookback <= 1 or deviation < 0 or quantity <= 0 or max_orders_per_market <= 0 or max_spread <= 0:
             raise ValueError("invalid mean-reversion parameters")
         self.lookback = lookback
         self.deviation = deviation
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
         self.stop_loss = stop_loss
+        self.max_spread = max_spread
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -273,6 +281,8 @@ class MeanReversionStrategy:
         price = snapshot.yes_ask if snapshot.yes_ask is not None else snapshot.yes_bid
         if price is None:
             return
+
+        spread = (snapshot.yes_ask - snapshot.yes_bid) if (snapshot.yes_ask is not None and snapshot.yes_bid is not None) else None
 
         history = self._history.setdefault(key, [])
         mean = sum(history[-self.lookback:]) / len(history[-self.lookback:]) if history else price
@@ -296,7 +306,7 @@ class MeanReversionStrategy:
                     strategy="mean-reversion",
                 )
                 return
-            elif snapshot.yes_bid <= entry - self.stop_loss:
+            elif snapshot.yes_bid <= entry - self.stop_loss and (spread is None or spread <= self.max_spread):
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -314,7 +324,7 @@ class MeanReversionStrategy:
                 return
 
         # Buy logic
-        if len(history) >= self.lookback and snapshot.yes_ask is not None:
+        if len(history) >= self.lookback and snapshot.yes_ask is not None and spread is not None and spread <= self.max_spread:
             if (
                 snapshot.yes_ask <= mean - self.deviation
                 and self._orders.get(key, 0) < self.max_orders_per_market
@@ -465,10 +475,11 @@ class FavoriteYieldStrategy:
         max_orders_per_market: int = 1,
         harvest_price: float = 0.97,
         stop_loss_price: float = 0.50,
+        max_spread: float = 0.06,
     ):
         if not (0.0 < min_probability <= max_probability < 1.0):
             raise ValueError("invalid probability range")
-        if lookback <= 0 or max_range < 0 or quantity <= 0 or max_orders_per_market <= 0:
+        if lookback <= 0 or max_range < 0 or quantity <= 0 or max_orders_per_market <= 0 or max_spread <= 0:
             raise ValueError("invalid favorite-yield parameters")
         self.min_probability = min_probability
         self.max_probability = max_probability
@@ -478,6 +489,7 @@ class FavoriteYieldStrategy:
         self.max_orders_per_market = max_orders_per_market
         self.harvest_price = harvest_price
         self.stop_loss_price = stop_loss_price
+        self.max_spread = max_spread
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -490,8 +502,12 @@ class FavoriteYieldStrategy:
             self._orders[key] = 0
             return
 
+        if snapshot.yes_ask is None or snapshot.yes_bid is None:
+            return
+        spread = snapshot.yes_ask - snapshot.yes_bid
+
         # Exit logic: harvest yield early once contract reaches near-parity (>= harvest_price) or stop out on collapse
-        if key in self._positions and snapshot.yes_bid is not None:
+        if key in self._positions:
             if snapshot.yes_bid >= self.harvest_price:
                 del self._positions[key]
                 self._orders[key] = 0
@@ -508,7 +524,7 @@ class FavoriteYieldStrategy:
                     strategy="favorite-yield",
                 )
                 return
-            elif snapshot.yes_bid <= self.stop_loss_price:
+            elif snapshot.yes_bid <= self.stop_loss_price and spread <= self.max_spread:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -525,7 +541,7 @@ class FavoriteYieldStrategy:
                 )
                 return
 
-        if snapshot.yes_ask is None:
+        if spread > self.max_spread:
             return
 
         history = self._history.setdefault(key, [])
@@ -993,35 +1009,40 @@ class SpreadHarvestingMarketMaker:
     """Autonomous market maker harvesting wide prediction market spreads.
 
     Estimates top-of-book micro-price and skews quotes based on inventory
-    (Avellaneda-Stoikov framework). Emits inside-the-spread limit orders.
+    (Avellaneda-Stoikov framework). Protects against illiquid book traps by
+    capping max executable spread and requiring quotes near or above entry cost.
     """
 
     def __init__(
         self,
         min_spread: float = 0.04,
+        max_spread: float = 0.15,
         inventory_skew: float = 0.01,
-        max_inventory: float = 10.0,
+        max_inventory: float = 5.0,
         quantity: float = 1.0,
         aggressiveness: float = 0.50,
     ):
-        if min_spread <= 0 or inventory_skew < 0 or max_inventory <= 0 or quantity <= 0:
+        if min_spread <= 0 or max_spread < min_spread or inventory_skew < 0 or max_inventory <= 0 or quantity <= 0:
             raise ValueError("invalid spread harvesting parameters")
         self.min_spread = min_spread
+        self.max_spread = max_spread
         self.inventory_skew = inventory_skew
         self.max_inventory = max_inventory
         self.quantity = quantity
         self.aggressiveness = aggressiveness
         self._inventory: dict[tuple[str, str], float] = {}
+        self._average_cost: dict[tuple[str, str], float] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
         if snapshot.yes_bid is None or snapshot.yes_ask is None:
             return
         spread = snapshot.yes_ask - snapshot.yes_bid
-        if spread < self.min_spread:
+        if not (self.min_spread <= spread <= self.max_spread):
             return
         key = (snapshot.venue, snapshot.market_id)
         current_inv = self._inventory.get(key, 0.0)
+        avg_cost = self._average_cost.get(key, 0.0)
 
         total_depth = snapshot.bid_size + snapshot.ask_size
         if total_depth > 0:
@@ -1033,25 +1054,17 @@ class SpreadHarvestingMarketMaker:
 
         reservation = micro_price - current_inv * self.inventory_skew
 
-        # Buy when inventory is below max and ask is within reservation bounds
-        if current_inv < self.max_inventory and snapshot.yes_ask <= reservation + spread * self.aggressiveness:
-            self._inventory[key] = current_inv + self.quantity
-            self._counter += 1
-            yield OrderIntent(
-                timestamp_ms=snapshot.timestamp_ms,
-                venue=snapshot.venue,
-                market_id=snapshot.market_id,
-                side=Side.BUY,
-                quantity=self.quantity,
-                limit_price=snapshot.yes_ask,
-                client_order_id=f"mm-buy-{self._counter}",
-                signal="mm-harvest-buy",
-                strategy="spread-harvesting",
-            )
-        # Sell when inventory exists and bid is within reservation bounds
-        elif current_inv > 0 and snapshot.yes_bid >= reservation - spread * self.aggressiveness:
+        # Sell when inventory exists, bid satisfies reservation, and bid does not cross wide loss
+        if (
+            current_inv > 0
+            and snapshot.yes_bid >= reservation - spread * self.aggressiveness
+            and snapshot.yes_bid >= (avg_cost - 0.03)
+        ):
             sell_qty = min(self.quantity, current_inv)
             self._inventory[key] = current_inv - sell_qty
+            if self._inventory[key] <= 1e-9:
+                self._inventory[key] = 0.0
+                self._average_cost[key] = 0.0
             self._counter += 1
             yield OrderIntent(
                 timestamp_ms=snapshot.timestamp_ms,
@@ -1062,6 +1075,26 @@ class SpreadHarvestingMarketMaker:
                 limit_price=snapshot.yes_bid,
                 client_order_id=f"mm-sell-{self._counter}",
                 signal="mm-harvest-sell",
+                strategy="spread-harvesting",
+            )
+        # Buy when inventory is below max and ask satisfies reservation
+        elif (
+            current_inv < self.max_inventory
+            and snapshot.yes_ask <= reservation + spread * self.aggressiveness
+        ):
+            new_inv = current_inv + self.quantity
+            self._average_cost[key] = (avg_cost * current_inv + snapshot.yes_ask * self.quantity) / new_inv
+            self._inventory[key] = new_inv
+            self._counter += 1
+            yield OrderIntent(
+                timestamp_ms=snapshot.timestamp_ms,
+                venue=snapshot.venue,
+                market_id=snapshot.market_id,
+                side=Side.BUY,
+                quantity=self.quantity,
+                limit_price=snapshot.yes_ask,
+                client_order_id=f"mm-buy-{self._counter}",
+                signal="mm-harvest-buy",
                 strategy="spread-harvesting",
             )
 
@@ -1359,10 +1392,11 @@ class TimeDecayYieldStrategy:
         max_orders_per_market: int = 1,
         harvest_price: float = 0.97,
         stop_loss_price: float = 0.50,
+        max_spread: float = 0.06,
     ):
         if not (0.0 < target_min_price <= target_max_price < 1.0):
             raise ValueError("invalid price boundaries")
-        if lookback <= 0 or max_volatility < 0 or quantity <= 0 or max_orders_per_market <= 0:
+        if lookback <= 0 or max_volatility < 0 or quantity <= 0 or max_orders_per_market <= 0 or max_spread <= 0:
             raise ValueError("invalid time-decay parameters")
         self.target_min_price = target_min_price
         self.target_max_price = target_max_price
@@ -1372,6 +1406,7 @@ class TimeDecayYieldStrategy:
         self.max_orders_per_market = max_orders_per_market
         self.harvest_price = harvest_price
         self.stop_loss_price = stop_loss_price
+        self.max_spread = max_spread
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -1384,8 +1419,12 @@ class TimeDecayYieldStrategy:
             self._orders[key] = 0
             return
 
+        if snapshot.yes_ask is None or snapshot.yes_bid is None:
+            return
+        spread = snapshot.yes_ask - snapshot.yes_bid
+
         # Exit logic: harvest yield once contract approaches 0.97+ or stop out on collapse
-        if key in self._positions and snapshot.yes_bid is not None:
+        if key in self._positions:
             if snapshot.yes_bid >= self.harvest_price:
                 del self._positions[key]
                 self._orders[key] = 0
@@ -1402,7 +1441,7 @@ class TimeDecayYieldStrategy:
                     strategy="time-decay-yield",
                 )
                 return
-            elif snapshot.yes_bid <= self.stop_loss_price:
+            elif snapshot.yes_bid <= self.stop_loss_price and spread <= self.max_spread:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -1419,7 +1458,7 @@ class TimeDecayYieldStrategy:
                 )
                 return
 
-        if snapshot.yes_ask is None:
+        if spread > self.max_spread:
             return
 
         history = self._history.setdefault(key, [])

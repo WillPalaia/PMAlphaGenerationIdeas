@@ -38,6 +38,7 @@ async def main() -> None:
     parser.add_argument("--market-limit", type=int, default=30, help="Maximum number of active markets to discover")
     parser.add_argument("--starting-cash", type=float, default=100.0)
     parser.add_argument("--fee-rate", type=float, default=0.01)
+    parser.add_argument("--reset-cash", action="store_true", help="Reset all strategy sub-portfolio cash to starting-cash")
     args = parser.parse_args()
 
     if not args.tickers and not args.discover:
@@ -47,7 +48,12 @@ async def main() -> None:
     log = logging.getLogger(__name__)
 
     store = SnapshotStore(args.db)
-    portfolio = PaperPortfolio(store, starting_cash=args.starting_cash, fee_rate=args.fee_rate)
+    portfolio = PaperPortfolio(
+        store,
+        starting_cash=args.starting_cash,
+        fee_rate=args.fee_rate,
+        reset_cash=args.reset_cash,
+    )
     discovery = KalshiMarketDiscovery()
 
     # Settle any previously opened positions that have finalized
@@ -139,23 +145,34 @@ async def main() -> None:
         next_discovery = now + args.discovery_interval
 
     strategy = MultiStrategy({
+        # 1. Statistical Mean Reversion & Deep Oversold (Top Performers)
+        "bollinger-reversion": BollingerReversionStrategy(lookback=15, entry_z=-2.0, exit_z=0.0),
+        "bollinger-deep-oversold": BollingerReversionStrategy(lookback=15, entry_z=-2.5, exit_z=-0.5),
+        "mean-reversion": MeanReversionStrategy(lookback=10, deviation=0.04, max_spread=0.08),
+
+        # 2. Probability Calibration & Low-Volatility Anchoring (Top Performers)
+        "stable-high-probability": StableHighProbabilityStrategy(lower_price=0.68, upper_price=0.72, lookback=5, max_range=0.03),
+        "stable-conservative-80": StableHighProbabilityStrategy(lower_price=0.78, upper_price=0.85, lookback=6, max_range=0.03),
         "threshold": BuyBelowThreshold(0.40),
-        "momentum": MomentumStrategy(),
-        "mean-reversion": MeanReversionStrategy(),
-        "stable-high-probability": StableHighProbabilityStrategy(),
-        "favorite-yield": FavoriteYieldStrategy(),
-        "orderbook-imbalance": OrderBookImbalanceStrategy(),
-        "bollinger-reversion": BollingerReversionStrategy(),
-        "range-breakout": RangeBreakoutStrategy(),
-        "ema-crossover": EmaCrossoverStrategy(),
-        "spread-harvesting": SpreadHarvestingMarketMaker(),
-        "complement-arbitrage": ComplementArbitrageStrategy(),
-        "vwap-pullback": VwapPullbackStrategy(),
-        "jump-following": JumpFollowingStrategy(),
-        "time-decay-yield": TimeDecayYieldStrategy(),
+
+        # 3. Order Book Microstructure Depth & Jump Dynamics (Top Performers)
+        "orderbook-imbalance": OrderBookImbalanceStrategy(imbalance_threshold=0.50, max_spread=0.05),
+        "jump-following": JumpFollowingStrategy(jump_threshold=0.06, lookback=3, take_profit=0.15, stop_loss=0.10),
+
+        # 4. Trend & Breakout Momentum (Fixed with Liquid Spread Filters)
+        "ema-crossover": EmaCrossoverStrategy(fast_span=5, slow_span=20, min_cross_diff=0.015),
+        "range-breakout": RangeBreakoutStrategy(lookback=20, breakout_margin=0.02),
+        "vwap-pullback": VwapPullbackStrategy(lookback=15, pullback_threshold=0.02),
+        "momentum": MomentumStrategy(lookback=3, minimum_move=0.03, take_profit=0.20, stop_loss=0.10, max_spread=0.08),
+
+        # 5. Yield Harvesting & Arbitrage (Protected against Illiquid Book Traps)
+        "favorite-yield": FavoriteYieldStrategy(min_probability=0.85, max_probability=0.96, max_spread=0.06, harvest_price=0.98, stop_loss_price=0.50),
+        "time-decay-yield": TimeDecayYieldStrategy(target_min_price=0.80, target_max_price=0.95, max_spread=0.06, harvest_price=0.98, stop_loss_price=0.50),
+        "spread-harvesting": SpreadHarvestingMarketMaker(min_spread=0.04, max_spread=0.15),
+        "complement-arbitrage": ComplementArbitrageStrategy(min_edge=0.01),
     })
     log.info(
-        "PAPER MODE ONLY: Running 14 paper strategies concurrently against snapshots; no live orders are sent"
+        "PAPER MODE ONLY: Running 16 diverse quantitative paper strategies concurrently in isolated sub-portfolios"
     )
 
     runner = PaperRunner(

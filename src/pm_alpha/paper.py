@@ -86,6 +86,7 @@ class PaperPortfolio:
         starting_cash: float = 100.0,
         fee_rate: float = 0.01,
         max_inventory_per_market: float = 100.0,
+        reset_cash: bool = False,
     ) -> None:
         if starting_cash < 0 or fee_rate < 0 or max_inventory_per_market <= 0:
             raise ValueError("invalid portfolio configuration")
@@ -100,8 +101,8 @@ class PaperPortfolio:
             row = connection.execute(
                 "SELECT cash, fees FROM paper_equity ORDER BY id DESC LIMIT 1"
             ).fetchone()
-            self.cash = float(row[0]) if row else float(starting_cash)
-            self.total_fees = float(row[1]) if row else 0.0
+            self.cash = float(starting_cash) if reset_cash or not row or float(row[0]) <= 0 else float(row[0])
+            self.total_fees = float(row[1]) if row and not reset_cash else 0.0
             for position in connection.execute(
                 "SELECT venue, market_id, quantity, average_cost, realized_pnl, settled "
                 "FROM paper_positions"
@@ -109,6 +110,37 @@ class PaperPortfolio:
                 self.positions[(position[0], position[1])] = PaperPosition(
                     position[2], position[3], position[4], bool(position[5])
                 )
+
+            # Load per-strategy state if available
+            has_strat_eq = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_strategy_equity'"
+            ).fetchone()
+            if has_strat_eq and not reset_cash:
+                for strat_row in connection.execute("""
+                    SELECT strategy, cash, fees FROM paper_strategy_equity
+                    WHERE id IN (SELECT MAX(id) FROM paper_strategy_equity GROUP BY strategy)
+                """):
+                    strat = strat_row[0]
+                    strat_cash = float(strat_row[1]) if float(strat_row[1]) > 0.0 else float(starting_cash)
+                    self.strategy_states[strat] = StrategyState(
+                        cash=strat_cash,
+                        total_fees=float(strat_row[2]),
+                        positions={},
+                    )
+
+            has_strat_pos = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_strategy_positions'"
+            ).fetchone()
+            if has_strat_pos:
+                for spos in connection.execute(
+                    "SELECT strategy, venue, market_id, quantity, average_cost, realized_pnl, settled "
+                    "FROM paper_strategy_positions"
+                ):
+                    strat = spos[0]
+                    s_state = self.strategy_states.setdefault(strat, StrategyState(cash=float(starting_cash)))
+                    s_state.positions[(spos[1], spos[2])] = PaperPosition(
+                        spos[3], spos[4], spos[5], bool(spos[6])
+                    )
 
     def process_snapshot(self, snapshot: MarketSnapshot) -> PortfolioMark:
         self._latest_snapshots[(snapshot.venue, snapshot.market_id)] = snapshot
@@ -122,9 +154,10 @@ class PaperPortfolio:
         return self._mark(snapshot.timestamp_ms, value)
 
     def submit(self, intent: OrderIntent, snapshot: MarketSnapshot) -> bool:
-        """Record an intent and fill against displayed top-of-book liquidity."""
+        """Record an intent and fill against displayed top-of-book liquidity with isolated strategy sub-portfolios."""
         strat = intent.strategy or intent.signal or "default"
         strat_state = self.strategy_states.setdefault(strat, StrategyState(cash=float(self.starting_cash)))
+        key = (intent.venue, intent.market_id)
 
         with self.store.connection() as connection:
             existing = connection.execute(
@@ -147,21 +180,21 @@ class PaperPortfolio:
                     fill_qty = min(intent.quantity, snapshot.ask_size)
                     fill_price = snapshot.yes_ask
             else:
-                position = self.positions.get((intent.venue, intent.market_id), PaperPosition())
+                s_pos = strat_state.positions.get(key, PaperPosition())
                 if snapshot.yes_bid is None or intent.limit_price > snapshot.yes_bid:
                     reject = "limit-not-marketable"
-                elif position.quantity <= 0:
+                elif s_pos.quantity <= 0:
                     reject = "inventory"
                 else:
-                    fill_qty = min(intent.quantity, snapshot.bid_size, position.quantity)
+                    fill_qty = min(intent.quantity, snapshot.bid_size, s_pos.quantity)
                     fill_price = snapshot.yes_bid
             if reject is None and fill_qty <= 0:
                 reject = "no-liquidity"
             if reject is None and intent.side is Side.BUY:
-                position = self.positions.get((intent.venue, intent.market_id), PaperPosition())
-                if position.quantity + fill_qty > self.max_inventory_per_market:
+                s_pos = strat_state.positions.get(key, PaperPosition())
+                if s_pos.quantity + fill_qty > self.max_inventory_per_market:
                     reject = "inventory-limit"
-                elif self.cash < fill_qty * float(fill_price) * (1 + self.fee_rate):
+                elif strat_state.cash < fill_qty * float(fill_price) * (1 + self.fee_rate):
                     reject = "insufficient-cash"
             status = "filled" if reject is None else "rejected"
             connection.execute(
@@ -177,38 +210,35 @@ class PaperPortfolio:
                 return False
             price = float(fill_price)
             fee = fill_qty * price * self.fee_rate
-            key = (intent.venue, intent.market_id)
 
             if intent.side is Side.BUY:
-                self.cash -= fill_qty * price + fee
-                position = self.positions.setdefault(key, PaperPosition())
-                total = position.quantity + fill_qty
-                position.average_cost = (
-                    (position.average_cost * position.quantity + fill_qty * price) / total
-                )
-                position.quantity = total
-
-                # Update strategy state
                 strat_state.cash -= fill_qty * price + fee
                 s_pos = strat_state.positions.setdefault(key, PaperPosition())
                 s_total = s_pos.quantity + fill_qty
                 s_pos.average_cost = ((s_pos.average_cost * s_pos.quantity + fill_qty * price) / s_total)
                 s_pos.quantity = s_total
-            else:
-                self.cash += fill_qty * price - fee
-                position = self.positions[key]
-                position.realized_pnl += fill_qty * (price - position.average_cost) - fee
-                position.quantity -= fill_qty
-                if position.quantity == 0:
-                    position.average_cost = 0.0
 
-                # Update strategy state
+                position = self.positions.setdefault(key, PaperPosition())
+                total = position.quantity + fill_qty
+                position.average_cost = ((position.average_cost * position.quantity + fill_qty * price) / total)
+                position.quantity = total
+                self.cash -= fill_qty * price + fee
+            else:
                 strat_state.cash += fill_qty * price - fee
-                s_pos = strat_state.positions.get(key, PaperPosition())
+                s_pos = strat_state.positions[key]
                 s_pos.realized_pnl += fill_qty * (price - s_pos.average_cost) - fee
                 s_pos.quantity -= fill_qty
-                if s_pos.quantity == 0:
+                if s_pos.quantity <= 1e-9:
+                    s_pos.quantity = 0.0
                     s_pos.average_cost = 0.0
+
+                position = self.positions.get(key, PaperPosition())
+                position.realized_pnl += fill_qty * (price - position.average_cost) - fee
+                position.quantity = max(0.0, position.quantity - fill_qty)
+                if position.quantity <= 1e-9:
+                    position.quantity = 0.0
+                    position.average_cost = 0.0
+                self.cash += fill_qty * price - fee
 
             self.total_fees += fee
             strat_state.total_fees += fee
@@ -221,12 +251,11 @@ class PaperPortfolio:
                  intent.side.value, fill_qty, price, fee),
             )
             self._persist_position(connection, intent.venue, intent.market_id)
-            self._persist_equity(connection, snapshot.timestamp_ms, self._portfolio_value(snapshot))
+            self._persist_strategy_position(connection, strat, intent.venue, intent.market_id)
 
-            # Persist per-strategy equity
             strat_pos_val = sum(
                 p.quantity * self._mark_price(self._latest_snapshots.get(k, snapshot))
-                for k, p in strat_state.positions.items() if p.quantity
+                for k, p in strat_state.positions.items() if p.quantity > 0
             )
             connection.execute(
                 """INSERT INTO paper_strategy_equity
@@ -235,33 +264,56 @@ class PaperPortfolio:
                 (snapshot.timestamp_ms, strat, strat_state.cash, strat_pos_val,
                  strat_state.cash + strat_pos_val, strat_state.total_fees),
             )
+            self._persist_equity(connection, snapshot.timestamp_ms, self._portfolio_value(snapshot))
             return True
 
     def _settle(self, snapshot: MarketSnapshot) -> None:
         key = (snapshot.venue, snapshot.market_id)
-        position = self.positions.get(key)
-        if position and position.quantity > 0:
-            payout = position.quantity * (1.0 if snapshot.settlement_yes else 0.0)
-            position.realized_pnl += payout - position.quantity * position.average_cost
-            self.cash += payout
-            position.quantity = 0.0
-            position.average_cost = 0.0
-            position.settled = True
+        outcome = 1.0 if snapshot.settlement_yes else 0.0
 
         for strat_name, strat_state in self.strategy_states.items():
             s_pos = strat_state.positions.get(key)
             if s_pos and s_pos.quantity > 0:
-                s_payout = s_pos.quantity * (1.0 if snapshot.settlement_yes else 0.0)
+                s_payout = s_pos.quantity * outcome
                 s_pos.realized_pnl += s_payout - s_pos.quantity * s_pos.average_cost
                 strat_state.cash += s_payout
                 s_pos.quantity = 0.0
                 s_pos.average_cost = 0.0
                 s_pos.settled = True
 
+        position = self.positions.get(key)
+        if position and position.quantity > 0:
+            payout = position.quantity * outcome
+            position.realized_pnl += payout - position.quantity * position.average_cost
+            self.cash += payout
+            position.quantity = 0.0
+            position.average_cost = 0.0
+            position.settled = True
+
         with self.store.connection() as connection:
             if position:
                 self._persist_position(connection, *key)
-            self._persist_equity(connection, snapshot.timestamp_ms, 0.0)
+            for strat_name in self.strategy_states:
+                self._persist_strategy_position(connection, strat_name, *key)
+            self._persist_equity(connection, snapshot.timestamp_ms, self._portfolio_value(snapshot))
+
+    def _persist_strategy_position(self, connection, strategy: str, venue: str, market_id: str) -> None:
+        strat_state = self.strategy_states.get(strategy)
+        if not strat_state:
+            return
+        pos = strat_state.positions.get((venue, market_id))
+        if not pos:
+            return
+        connection.execute(
+            """INSERT INTO paper_strategy_positions
+            (strategy, venue, market_id, quantity, average_cost, realized_pnl, settled)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(strategy, venue, market_id) DO UPDATE SET quantity=excluded.quantity,
+            average_cost=excluded.average_cost, realized_pnl=excluded.realized_pnl,
+            settled=excluded.settled""",
+            (strategy, venue, market_id, pos.quantity, pos.average_cost,
+             pos.realized_pnl, int(pos.settled)),
+        )
 
     def _portfolio_value(self, snapshot: MarketSnapshot) -> float:
         value = self.cash
@@ -354,19 +406,23 @@ class PaperRunner:
             for snapshot in snapshots:
                 if self.portfolio is not None:
                     self.portfolio.process_snapshot(snapshot)
+                if snapshot.resolved:
+                    self._market_exposure.pop((snapshot.venue, snapshot.market_id), None)
                 for intent in self.strategy.on_snapshot(snapshot):
                     if not self._is_allowed(intent):
                         logger.warning("Rejected paper intent %s by risk limits", intent.client_order_id)
                         continue
                     key = (intent.venue, intent.market_id)
                     notional = intent.quantity * intent.limit_price
-                    if intent.side is Side.BUY:
-                        self._market_exposure[key] = self._market_exposure.get(key, 0.0) + notional
-                    else:
-                        self._market_exposure[key] = max(0.0, self._market_exposure.get(key, 0.0) - notional)
+                    filled = False
                     if self.portfolio is not None:
-                        self.portfolio.submit(intent, snapshot)
-                    if self.on_intent is not None:
+                        filled = self.portfolio.submit(intent, snapshot)
+                    if filled:
+                        if intent.side is Side.BUY:
+                            self._market_exposure[key] = self._market_exposure.get(key, 0.0) + notional
+                        else:
+                            self._market_exposure[key] = max(0.0, self._market_exposure.get(key, 0.0) - notional)
+                    if self.on_intent is not None and filled:
                         await self.on_intent(intent)
             try:
                 await asyncio.wait_for(self._stop.wait(), self.config.poll_interval_seconds)
@@ -377,8 +433,7 @@ class PaperRunner:
         if intent.side is Side.SELL:
             return True
         notional = intent.quantity * intent.limit_price
+        if notional > self.config.max_order_notional:
+            return False
         exposure = self._market_exposure.get((intent.venue, intent.market_id), 0.0)
-        return (
-            notional <= self.config.max_order_notional
-            and exposure + notional <= self.config.max_market_exposure
-        )
+        return exposure + notional <= self.config.max_market_exposure
