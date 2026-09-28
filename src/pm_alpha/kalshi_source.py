@@ -19,12 +19,13 @@ class KalshiPublicSource:
         self,
         market_tickers: list[str],
         base_url: str = "https://external-api.kalshi.com/trade-api/v2",
+        concurrency: int = 8,
     ) -> None:
         if not market_tickers:
             raise ValueError("at least one market ticker is required")
         self.market_tickers = tuple(market_tickers)
         self.base_url = base_url.rstrip("/")
-        self._semaphore = asyncio.Semaphore(2)
+        self._semaphore = asyncio.Semaphore(concurrency)
 
     def set_market_tickers(self, market_tickers: list[str]) -> None:
         if not market_tickers:

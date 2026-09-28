@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 from .models import MarketSnapshot, OrderIntent, Side
 from .storage import SnapshotStore
@@ -47,18 +47,66 @@ class PortfolioMark:
 
 
 class MultiStrategy:
-    """Fan out each snapshot to independent strategies (still paper-only)."""
+    """Fan out each snapshot to independent strategies with strategy-specific market basket filtering."""
 
-    def __init__(self, strategies: dict[str, PaperStrategy] | list[PaperStrategy]):
+    def __init__(
+        self,
+        strategies: dict[str, PaperStrategy] | list[PaperStrategy],
+        baskets: dict[str, set[str] | list[str] | Callable[[MarketSnapshot], bool]] | None = None,
+        market_metadata: dict[str, Any] | None = None,
+    ) -> None:
         self.strategies = (
             list(strategies.items()) if isinstance(strategies, dict)
             else [(getattr(strategy, "name", str(strategy)), strategy) for strategy in strategies]
         )
+        self.baskets = baskets or {}
+        self.market_metadata = market_metadata or {}
+
+    def set_market_metadata(self, metadata: dict[str, Any]) -> None:
+        self.market_metadata = metadata
+
+    def set_strategy_basket(
+        self,
+        strategy_name: str,
+        allowed: set[str] | list[str] | Callable[[MarketSnapshot], bool],
+    ) -> None:
+        self.baskets[strategy_name] = allowed
+
+    def is_market_allowed(self, strategy_name: str, snapshot: MarketSnapshot) -> bool:
+        allowed = self.baskets.get(strategy_name)
+        if allowed is None or allowed == "all":
+            return True
+        if isinstance(allowed, (set, list)) and ("all" in allowed or "*" in allowed):
+            return True
+        if callable(allowed):
+            return bool(allowed(snapshot))
+
+        ticker = snapshot.market_id
+        meta = self.market_metadata.get(ticker)
+        if meta and hasattr(meta, "category"):
+            category = meta.category
+            hours_to_close = getattr(meta, "hours_to_close", 9999.0)
+        else:
+            from .discovery import classify_market
+            category = classify_market(ticker)
+            hours_to_close = 9999.0
+
+        allowed_set = set(allowed)
+        if category in allowed_set:
+            return True
+        if "closing_soon" in allowed_set and hours_to_close <= 48.0:
+            return True
+        if "liquid" in allowed_set and meta and (getattr(meta, "volume", 0) > 0 or getattr(meta, "liquidity_dollars", 0) > 0):
+            return True
+
+        return False
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> list[OrderIntent]:
         from dataclasses import replace
         intents: list[OrderIntent] = []
         for name, strategy in self.strategies:
+            if not self.is_market_allowed(name, snapshot):
+                continue
             for intent in strategy.on_snapshot(snapshot):
                 if not intent.strategy:
                     intent = replace(intent, strategy=name)
