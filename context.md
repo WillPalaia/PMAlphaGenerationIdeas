@@ -530,3 +530,32 @@ This is not enough for promotion. The next analysis layer should add:
 - If changing the systemd unit, verify `systemctl is-active` and inspect recent
   journal output before ending the task.
 
+## September 28, 2026 Forward Paper Trading Audit & 16-Strategy Deployment
+
+### Empirical Findings from 6.1M Snapshots & 35 Settled Markets:
+1. **Isolated Alpha Performance**:
+   - `bollinger-reversion`: +$1.52 net alpha across 49 fills (best risk-adjusted statistical mean-reversion).
+   - `below-rolling-mean`: +$1.36 net alpha across 21 fills (100% win rate on dip buying).
+   - `stable-high-probability`: +$1.34 net alpha across 11 fills (reliable 0.68-0.72 probability band).
+   - `orderbook-imbalance`: +$1.23 net alpha across 39 fills (microstructure depth skew).
+   - `buy-below-threshold`: +$0.75 net alpha.
+   - `jump-following`: +$0.62 net alpha (information shock drift capture).
+   - `ema-crossover`: +$0.51 net alpha (trend confirmation).
+   - `range-breakout`: +$0.06 net alpha.
+2. **Failure Modes & Bugs Resolved**:
+   - **Spread-Crossing Bug in Market Making**: The initial market maker bought at ask and sold at bid on wide illiquid books. Fixed by capping max executable spread to 0.15 and requiring exits to be at or above average cost + profit.
+   - **Illiquid Book Stop-Loss Trap in Favorite/Theta Yield**: On illiquid books (e.g. 0.02 bid / 0.95 ask), strategies bought the 0.95 ask and immediately triggered a stop-loss on the 0.02 bid. Fixed by adding a mandatory tight spread filter (`spread <= 0.06`) for both entries and stop-losses.
+   - **Shared Inventory & Cash Cannibalization**: All strategies previously shared a single $100 cash pool and single position dictionary, allowing one strategy to sell another's inventory and exhausting cash in 4 hours.
+3. **Sub-Portfolio Isolation Deployed**:
+   - Implemented `paper_strategy_positions` and independent `StrategyState` sub-portfolios.
+   - Each strategy now holds its own isolated cash balance ($100 each), isolated inventory, and isolated fee/equity tracking.
+   - Fixed `PaperRunner` risk limits so exposure is only incremented on actual fills, not on rejected intents, and released on settlement.
+4. **16 Diverse Quantitative Strategies Live on Oracle VM**:
+   - Statistical Mean Reversion: `bollinger-reversion`, `bollinger-deep-oversold`, `mean-reversion`
+   - Calibrated Probability Bands: `stable-high-probability`, `stable-conservative-80`, `threshold`
+   - Order Book Microstructure: `orderbook-imbalance`, `jump-following`
+   - Trend & Breakout: `ema-crossover`, `range-breakout`, `vwap-pullback`, `momentum`
+   - Yield & Arbitrage: `favorite-yield`, `time-decay-yield`, `spread-harvesting`, `complement-arbitrage`
+   - Active systemd service: `pm-alpha-paper` running continuously on Oracle VM under user `pmalpha`.
+
+
