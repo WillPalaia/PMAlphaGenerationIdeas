@@ -269,3 +269,50 @@ def test_order_book_imbalance_cuts_on_queue_flip():
     assert ("kalshi", "m1") not in strategy._positions
 
 
+def test_order_flow_imbalance_triggers_on_persistent_accumulating_pressure():
+    from pm_alpha.strategies import OrderFlowImbalanceStrategy
+    strategy = OrderFlowImbalanceStrategy(lookback=3, min_cumulative_ofi=6.0, max_spread=0.04)
+
+    # Base snapshot
+    list(strategy.on_snapshot(MarketSnapshot(1, "kalshi", "m1", 0.50, 0.52, 10, 10)))
+    # Bid increases by +4, ask decreases by -2 (step OFI = 4 - (-2) = 6)
+    list(strategy.on_snapshot(MarketSnapshot(2, "kalshi", "m1", 0.50, 0.52, 14, 8)))
+    # Bid increases by +3 (step OFI = 3)
+    list(strategy.on_snapshot(MarketSnapshot(3, "kalshi", "m1", 0.50, 0.52, 17, 8)))
+    # Cumulative OFI is >= 6 -> triggers buy
+    buys = list(strategy.on_snapshot(MarketSnapshot(4, "kalshi", "m1", 0.50, 0.52, 18, 7)))
+    assert len(buys) == 1
+    assert buys[0].side == Side.BUY
+    assert buys[0].signal == "order-flow-imbalance"
+
+    # Price rises to 0.57 (+0.05 gain) -> triggers take profit
+    sells = list(strategy.on_snapshot(MarketSnapshot(5, "kalshi", "m1", 0.57, 0.58, 10, 10)))
+    assert len(sells) == 1
+    assert sells[0].side == Side.SELL
+    assert sells[0].signal == "ofi-take-profit"
+
+
+def test_volume_mean_reversion_triggers_on_deep_book_discount():
+    from pm_alpha.strategies import VolumeWeightedMeanReversionStrategy
+    strategy = VolumeWeightedMeanReversionStrategy(lookback=4, deviation=0.04, min_depth=3.0, max_spread=0.04)
+
+    # Establish mean around 0.50 with deep books
+    for t in range(1, 5):
+        list(strategy.on_snapshot(MarketSnapshot(t, "kalshi", "m1", 0.49, 0.50, 10, 10)))
+
+    # Dip to 0.45 with thin depth (ask_size=1 < 3.0) -> rejected by liquidity filter
+    assert list(strategy.on_snapshot(MarketSnapshot(5, "kalshi", "m1", 0.43, 0.45, 10, 1))) == []
+
+    # Dip to 0.44 with verified depth (ask_size=5, bid_size=5) -> triggers buy
+    buys = list(strategy.on_snapshot(MarketSnapshot(6, "kalshi", "m1", 0.43, 0.44, 5, 5)))
+    assert len(buys) == 1
+    assert buys[0].side == Side.BUY
+    assert buys[0].signal == "volume-mean-reversion"
+
+    # Rebound back to mean 0.50 -> triggers reverted exit
+    sells = list(strategy.on_snapshot(MarketSnapshot(7, "kalshi", "m1", 0.50, 0.51, 10, 10)))
+    assert len(sells) == 1
+    assert sells[0].side == Side.SELL
+    assert sells[0].signal == "vmr-reverted-exit"
+
+

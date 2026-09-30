@@ -476,6 +476,8 @@ class FavoriteYieldStrategy:
         harvest_price: float = 0.97,
         stop_loss_price: float = 0.50,
         max_spread: float = 0.06,
+        min_depth: float = 1.0,
+        min_stop_loss_bid: float = 0.20,
     ):
         if not (0.0 < min_probability <= max_probability < 1.0):
             raise ValueError("invalid probability range")
@@ -490,6 +492,8 @@ class FavoriteYieldStrategy:
         self.harvest_price = harvest_price
         self.stop_loss_price = stop_loss_price
         self.max_spread = max_spread
+        self.min_depth = min_depth
+        self.min_stop_loss_bid = min_stop_loss_bid
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -524,7 +528,7 @@ class FavoriteYieldStrategy:
                     strategy="favorite-yield",
                 )
                 return
-            elif snapshot.yes_bid <= self.stop_loss_price and spread <= self.max_spread:
+            elif self.min_stop_loss_bid <= snapshot.yes_bid <= self.stop_loss_price and spread <= self.max_spread:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -541,7 +545,7 @@ class FavoriteYieldStrategy:
                 )
                 return
 
-        if spread > self.max_spread:
+        if spread > self.max_spread or snapshot.ask_size < self.min_depth:
             return
 
         history = self._history.setdefault(key, [])
@@ -697,6 +701,8 @@ class BollingerReversionStrategy:
         exit_z: float = 0.0,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
+        prefix: str = "boll",
+        strategy_name: str = "bollinger-reversion",
     ):
         if lookback <= 2 or quantity <= 0 or max_orders_per_market <= 0 or entry_z >= exit_z:
             raise ValueError("invalid bollinger parameters")
@@ -705,6 +711,8 @@ class BollingerReversionStrategy:
         self.exit_z = exit_z
         self.quantity = quantity
         self.max_orders_per_market = max_orders_per_market
+        self.prefix = prefix
+        self.strategy_name = strategy_name
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -745,9 +753,9 @@ class BollingerReversionStrategy:
                         side=Side.BUY,
                         quantity=self.quantity,
                         limit_price=snapshot.yes_ask,
-                        client_order_id=f"boll-buy-{self._counter}",
+                        client_order_id=f"{self.prefix}-buy-{self._counter}",
                         signal="bollinger-oversold",
-                        strategy="bollinger-reversion",
+                        strategy=self.strategy_name,
                     )
                 # Sell to exit on mean reversion
                 elif z >= self.exit_z and pos > 0 and snapshot.yes_bid is not None:
@@ -761,9 +769,9 @@ class BollingerReversionStrategy:
                         side=Side.SELL,
                         quantity=sell_qty,
                         limit_price=snapshot.yes_bid,
-                        client_order_id=f"boll-sell-{self._counter}",
+                        client_order_id=f"{self.prefix}-sell-{self._counter}",
                         signal="bollinger-exit",
-                        strategy="bollinger-reversion",
+                        strategy=self.strategy_name,
                     )
 
 
@@ -1021,6 +1029,7 @@ class SpreadHarvestingMarketMaker:
         max_inventory: float = 5.0,
         quantity: float = 1.0,
         aggressiveness: float = 0.50,
+        min_profit: float = -0.03,
     ):
         if min_spread <= 0 or max_spread < min_spread or inventory_skew < 0 or max_inventory <= 0 or quantity <= 0:
             raise ValueError("invalid spread harvesting parameters")
@@ -1030,6 +1039,7 @@ class SpreadHarvestingMarketMaker:
         self.max_inventory = max_inventory
         self.quantity = quantity
         self.aggressiveness = aggressiveness
+        self.min_profit = min_profit
         self._inventory: dict[tuple[str, str], float] = {}
         self._average_cost: dict[tuple[str, str], float] = {}
         self._counter = 0
@@ -1054,11 +1064,11 @@ class SpreadHarvestingMarketMaker:
 
         reservation = micro_price - current_inv * self.inventory_skew
 
-        # Sell when inventory exists, bid satisfies reservation, and bid does not cross wide loss
+        # Sell when inventory exists, bid satisfies reservation, and bid covers min_profit
         if (
             current_inv > 0
             and snapshot.yes_bid >= reservation - spread * self.aggressiveness
-            and snapshot.yes_bid >= (avg_cost - 0.03)
+            and snapshot.yes_bid >= (avg_cost + self.min_profit)
         ):
             sell_qty = min(self.quantity, current_inv)
             self._inventory[key] = current_inv - sell_qty
@@ -1393,6 +1403,8 @@ class TimeDecayYieldStrategy:
         harvest_price: float = 0.97,
         stop_loss_price: float = 0.50,
         max_spread: float = 0.06,
+        min_depth: float = 1.0,
+        min_stop_loss_bid: float = 0.20,
     ):
         if not (0.0 < target_min_price <= target_max_price < 1.0):
             raise ValueError("invalid price boundaries")
@@ -1407,6 +1419,8 @@ class TimeDecayYieldStrategy:
         self.harvest_price = harvest_price
         self.stop_loss_price = stop_loss_price
         self.max_spread = max_spread
+        self.min_depth = min_depth
+        self.min_stop_loss_bid = min_stop_loss_bid
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -1441,7 +1455,7 @@ class TimeDecayYieldStrategy:
                     strategy="time-decay-yield",
                 )
                 return
-            elif snapshot.yes_bid <= self.stop_loss_price and spread <= self.max_spread:
+            elif self.min_stop_loss_bid <= snapshot.yes_bid <= self.stop_loss_price and spread <= self.max_spread:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -1458,7 +1472,7 @@ class TimeDecayYieldStrategy:
                 )
                 return
 
-        if spread > self.max_spread:
+        if spread > self.max_spread or snapshot.ask_size < self.min_depth:
             return
 
         history = self._history.setdefault(key, [])
@@ -1487,3 +1501,240 @@ class TimeDecayYieldStrategy:
                 signal="time-decay-yield",
                 strategy="time-decay-yield",
             )
+
+
+class OrderFlowImbalanceStrategy:
+    """Multi-cycle Order Flow Imbalance (OFI) microstructure momentum strategy.
+
+    Measures institutional and retail book accumulation pressure:
+    OFI = Delta(Bid_Size) - Delta(Ask_Size) over consecutive snapshots.
+    When cumulative OFI remains persistently positive with a tight spread,
+    enters ahead of expected ask lift and scalps a quick profit.
+    """
+
+    def __init__(
+        self,
+        lookback: int = 3,
+        min_cumulative_ofi: float = 8.0,
+        max_spread: float = 0.04,
+        quantity: float = 1.0,
+        max_orders_per_market: int = 1,
+        take_profit: float = 0.05,
+        stop_loss: float = 0.06,
+    ):
+        if lookback <= 0 or min_cumulative_ofi <= 0 or max_spread <= 0 or quantity <= 0:
+            raise ValueError("invalid OFI parameters")
+        self.lookback = lookback
+        self.min_cumulative_ofi = min_cumulative_ofi
+        self.max_spread = max_spread
+        self.quantity = quantity
+        self.max_orders_per_market = max_orders_per_market
+        self.take_profit = take_profit
+        self.stop_loss = stop_loss
+        self._prev_book: dict[tuple[str, str], tuple[float, float, float, float]] = {}
+        self._ofi_history: dict[tuple[str, str], list[float]] = {}
+        self._positions: dict[tuple[str, str], float] = {}
+        self._orders: dict[tuple[str, str], int] = {}
+        self._counter = 0
+
+    def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            self._prev_book.pop(key, None)
+            self._ofi_history.pop(key, None)
+            return
+
+        if snapshot.yes_ask is None or snapshot.yes_bid is None:
+            return
+        spread = snapshot.yes_ask - snapshot.yes_bid
+
+        # Exit logic
+        if key in self._positions:
+            entry = self._positions[key]
+            if snapshot.yes_bid >= entry + self.take_profit - 1e-9:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"ofi-tp-{self._counter}",
+                    signal="ofi-take-profit",
+                    strategy="order-flow-imbalance",
+                )
+                return
+            elif snapshot.yes_bid <= entry - self.stop_loss and spread <= self.max_spread:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"ofi-sl-{self._counter}",
+                    signal="ofi-stop-loss",
+                    strategy="order-flow-imbalance",
+                )
+                return
+
+        prev = self._prev_book.get(key)
+        self._prev_book[key] = (snapshot.yes_bid, snapshot.bid_size, snapshot.yes_ask, snapshot.ask_size)
+        if prev is None:
+            return
+
+        prev_bid, prev_b_sz, prev_ask, prev_a_sz = prev
+        # Compute snapshot order flow imbalance
+        delta_b = snapshot.bid_size if snapshot.yes_bid > prev_bid else (snapshot.bid_size - prev_b_sz if snapshot.yes_bid == prev_bid else 0.0)
+        delta_a = 0.0 if snapshot.yes_ask > prev_ask else (snapshot.ask_size - prev_a_sz if snapshot.yes_ask == prev_ask else snapshot.ask_size)
+        step_ofi = delta_b - delta_a
+
+        history = self._ofi_history.setdefault(key, [])
+        history.append(step_ofi)
+        if len(history) > self.lookback:
+            del history[0]
+
+        cum_ofi = sum(history)
+        if (
+            len(history) == self.lookback
+            and cum_ofi >= self.min_cumulative_ofi
+            and spread <= self.max_spread
+            and self._orders.get(key, 0) < self.max_orders_per_market
+            and key not in self._positions
+        ):
+            self._orders[key] = self._orders.get(key, 0) + 1
+            self._positions[key] = snapshot.yes_ask
+            self._counter += 1
+            yield OrderIntent(
+                timestamp_ms=snapshot.timestamp_ms,
+                venue=snapshot.venue,
+                market_id=snapshot.market_id,
+                side=Side.BUY,
+                quantity=self.quantity,
+                limit_price=snapshot.yes_ask,
+                client_order_id=f"ofi-buy-{self._counter}",
+                signal="order-flow-imbalance",
+                strategy="order-flow-imbalance",
+            )
+
+
+class VolumeWeightedMeanReversionStrategy:
+    """Depth-anchored statistical mean reversion strategy.
+
+    Extends rolling mean reversion by requiring verified order book depth
+    (minimum bid and ask sizes) and tight spreads, ensuring entries are
+    true transient liquidity discounts rather than market-order voids.
+    """
+
+    def __init__(
+        self,
+        lookback: int = 12,
+        deviation: float = 0.04,
+        min_depth: float = 4.0,
+        max_spread: float = 0.05,
+        quantity: float = 1.0,
+        max_orders_per_market: int = 1,
+        take_profit: float = 0.08,
+        stop_loss: float = 0.10,
+    ):
+        if lookback <= 1 or deviation < 0 or min_depth <= 0 or max_spread <= 0 or quantity <= 0:
+            raise ValueError("invalid volume mean reversion parameters")
+        self.lookback = lookback
+        self.deviation = deviation
+        self.min_depth = min_depth
+        self.max_spread = max_spread
+        self.quantity = quantity
+        self.max_orders_per_market = max_orders_per_market
+        self.take_profit = take_profit
+        self.stop_loss = stop_loss
+        self._history: dict[tuple[str, str], list[float]] = {}
+        self._positions: dict[tuple[str, str], float] = {}
+        self._orders: dict[tuple[str, str], int] = {}
+        self._counter = 0
+
+    def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        if snapshot.yes_ask is None or snapshot.yes_bid is None:
+            return
+        spread = snapshot.yes_ask - snapshot.yes_bid
+
+        history = self._history.setdefault(key, [])
+        mean = sum(history[-self.lookback:]) / len(history[-self.lookback:]) if history else snapshot.yes_ask
+
+        # Exit logic
+        if key in self._positions:
+            entry = self._positions[key]
+            if snapshot.yes_bid >= mean or snapshot.yes_bid >= entry + self.take_profit:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"vmr-exit-{self._counter}",
+                    signal="vmr-reverted-exit",
+                    strategy="volume-mean-reversion",
+                )
+                return
+            elif snapshot.yes_bid <= entry - self.stop_loss and spread <= self.max_spread:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"vmr-sl-{self._counter}",
+                    signal="vmr-stop-loss",
+                    strategy="volume-mean-reversion",
+                )
+                return
+
+        # Entry logic
+        if (
+            len(history) >= self.lookback
+            and spread <= self.max_spread
+            and snapshot.ask_size >= self.min_depth
+            and snapshot.bid_size >= self.min_depth
+            and snapshot.yes_ask <= mean - self.deviation
+            and self._orders.get(key, 0) < self.max_orders_per_market
+            and key not in self._positions
+        ):
+            self._orders[key] = self._orders.get(key, 0) + 1
+            self._positions[key] = snapshot.yes_ask
+            self._counter += 1
+            yield OrderIntent(
+                timestamp_ms=snapshot.timestamp_ms,
+                venue=snapshot.venue,
+                market_id=snapshot.market_id,
+                side=Side.BUY,
+                quantity=self.quantity,
+                limit_price=snapshot.yes_ask,
+                client_order_id=f"vmr-buy-{self._counter}",
+                signal="volume-mean-reversion",
+                strategy="volume-mean-reversion",
+            )
+
+        history.append(snapshot.yes_ask)
+        if len(history) > self.lookback * 2:
+            del history[:len(history) - self.lookback * 2]

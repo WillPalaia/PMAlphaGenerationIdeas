@@ -94,7 +94,7 @@ class MultiStrategy:
         allowed_set = set(allowed)
         if category in allowed_set:
             return True
-        if "closing_soon" in allowed_set and hours_to_close <= 48.0:
+        if "closing_soon" in allowed_set and hours_to_close <= 48.0 and category not in ("esports", "other"):
             return True
         if "liquid" in allowed_set and meta and (getattr(meta, "volume", 0) > 0 or getattr(meta, "liquidity_dollars", 0) > 0):
             return True
@@ -108,8 +108,7 @@ class MultiStrategy:
             if not self.is_market_allowed(name, snapshot):
                 continue
             for intent in strategy.on_snapshot(snapshot):
-                if not intent.strategy:
-                    intent = replace(intent, strategy=name)
+                intent = replace(intent, strategy=name)
                 intents.append(intent)
         return intents
 
@@ -145,6 +144,7 @@ class PaperPortfolio:
         self.positions: dict[tuple[str, str], PaperPosition] = {}
         self.strategy_states: dict[str, StrategyState] = {}
         self._latest_snapshots: dict[tuple[str, str], MarketSnapshot] = {}
+        self._last_mark_ms: int = 0
         with store.connection() as connection:
             row = connection.execute(
                 "SELECT cash, fees FROM paper_equity ORDER BY id DESC LIMIT 1"
@@ -371,11 +371,26 @@ class PaperPortfolio:
                 value += position.quantity * self._mark_price(self._latest_snapshots[key])
         return value
 
-    def _mark(self, timestamp_ms: int, positions_value: float) -> PortfolioMark:
+    def _mark(self, timestamp_ms: int, positions_value: float, force: bool = False) -> PortfolioMark:
         mark = PortfolioMark(timestamp_ms, self.cash, positions_value,
                              self.cash + positions_value, self.total_fees)
-        with self.store.connection() as connection:
-            self._persist_equity(connection, timestamp_ms, positions_value)
+        if force or (timestamp_ms - self._last_mark_ms >= 60_000):
+            self._last_mark_ms = timestamp_ms
+            with self.store.connection() as connection:
+                self._persist_equity(connection, timestamp_ms, positions_value)
+                for strat, s_state in self.strategy_states.items():
+                    s_pos_val = sum(
+                        p.quantity * self._mark_price(self._latest_snapshots[k])
+                        for k, p in s_state.positions.items()
+                        if p.quantity > 0 and k in self._latest_snapshots
+                    )
+                    connection.execute(
+                        """INSERT INTO paper_strategy_equity
+                        (timestamp_ms, strategy, cash, positions_value, equity, fees)
+                        VALUES (?, ?, ?, ?, ?, ?)""",
+                        (timestamp_ms, strat, s_state.cash, s_pos_val,
+                         s_state.cash + s_pos_val, s_state.total_fees),
+                    )
         return mark
 
     def _persist_position(self, connection, venue: str, market_id: str) -> None:

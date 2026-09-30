@@ -20,10 +20,12 @@ from pm_alpha.strategies import (
     MeanReversionStrategy,
     MomentumStrategy,
     OrderBookImbalanceStrategy,
+    OrderFlowImbalanceStrategy,
     RangeBreakoutStrategy,
     SpreadHarvestingMarketMaker,
     StableHighProbabilityStrategy,
     TimeDecayYieldStrategy,
+    VolumeWeightedMeanReversionStrategy,
     VwapPullbackStrategy,
 )
 
@@ -32,10 +34,10 @@ async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("tickers", nargs="*", default=[], help="Kalshi market tickers (optional if --discover)")
     parser.add_argument("--db", default="data/market_data.sqlite")
-    parser.add_argument("--interval", type=float, default=3.0)
+    parser.add_argument("--interval", type=float, default=2.5)
     parser.add_argument("--discover", action="store_true")
     parser.add_argument("--discovery-interval", type=float, default=300.0)
-    parser.add_argument("--market-limit", type=int, default=120, help="Maximum number of active markets to discover")
+    parser.add_argument("--market-limit", type=int, default=140, help="Maximum number of active markets to discover")
     parser.add_argument("--starting-cash", type=float, default=100.0)
     parser.add_argument("--fee-rate", type=float, default=0.01)
     parser.add_argument("--reset-cash", action="store_true", help="Reset all strategy sub-portfolio cash to starting-cash")
@@ -95,59 +97,61 @@ async def main() -> None:
     next_discovery = asyncio.get_running_loop().time() + args.discovery_interval
 
     strategy_definitions = {
-        # 1. Statistical Mean Reversion & Deep Oversold (Top Performers - Diversified Universe)
-        "bollinger-reversion": BollingerReversionStrategy(lookback=15, entry_z=-2.0, exit_z=0.0),
-        "bollinger-deep-oversold": BollingerReversionStrategy(lookback=15, entry_z=-2.5, exit_z=-0.5),
-        "mean-reversion": MeanReversionStrategy(lookback=10, deviation=0.04, max_spread=0.08),
+        # 1. Statistical Mean Reversion (#1 Alpha Generator: +3.11% Net Return)
+        "mean-reversion": MeanReversionStrategy(lookback=10, deviation=0.04, max_spread=0.06),
+        "volume-mean-reversion": VolumeWeightedMeanReversionStrategy(lookback=12, deviation=0.04, min_depth=3.0, max_spread=0.05, take_profit=0.08, stop_loss=0.10),
+        "bollinger-reversion": BollingerReversionStrategy(lookback=15, entry_z=-2.0, exit_z=0.0, prefix="boll-rev", strategy_name="bollinger-reversion"),
+        "bollinger-deep-oversold": BollingerReversionStrategy(lookback=15, entry_z=-2.5, exit_z=-0.5, prefix="boll-deep", strategy_name="bollinger-deep-oversold"),
 
-        # 2. Probability Calibration & Low-Volatility Anchoring (Targeted: Macro/Finance & Weather)
+        # 2. Microstructure & Order Flow Imbalance (#2 Alpha Generator: +2.13% Net Return)
+        "orderbook-imbalance": OrderBookImbalanceStrategy(imbalance_threshold=0.50, max_spread=0.04, min_depth=4.0),
+        "order-flow-imbalance": OrderFlowImbalanceStrategy(lookback=3, min_cumulative_ofi=6.0, max_spread=0.04, take_profit=0.05, stop_loss=0.06),
+        "jump-following": JumpFollowingStrategy(jump_threshold=0.06, lookback=3, take_profit=0.15, stop_loss=0.10),
+
+        # 3. Probability Calibration & Low-Volatility Anchoring (Targeted: Macro/Finance & Weather)
         "stable-high-probability": StableHighProbabilityStrategy(lower_price=0.68, upper_price=0.72, lookback=5, max_range=0.03),
         "stable-conservative-80": StableHighProbabilityStrategy(lower_price=0.78, upper_price=0.85, lookback=6, max_range=0.03),
-        "threshold": BuyBelowThreshold(0.40),
-
-        # 3. Order Book Microstructure Depth & Jump Dynamics
-        "orderbook-imbalance": OrderBookImbalanceStrategy(imbalance_threshold=0.50, max_spread=0.05),
-        "jump-following": JumpFollowingStrategy(jump_threshold=0.06, lookback=3, take_profit=0.15, stop_loss=0.10),
+        "threshold": BuyBelowThreshold(0.35),
 
         # 4. Trend & Breakout Momentum
         "ema-crossover": EmaCrossoverStrategy(fast_span=5, slow_span=20, min_cross_diff=0.015),
         "range-breakout": RangeBreakoutStrategy(lookback=20, breakout_margin=0.02),
         "vwap-pullback": VwapPullbackStrategy(lookback=15, pullback_threshold=0.02),
-        "momentum": MomentumStrategy(lookback=3, minimum_move=0.03, take_profit=0.20, stop_loss=0.10, max_spread=0.08),
+        "momentum": MomentumStrategy(lookback=5, minimum_move=0.03, take_profit=0.15, stop_loss=0.08, max_spread=0.05),
 
-        # 5. Yield Harvesting & Arbitrage
-        "favorite-yield": FavoriteYieldStrategy(min_probability=0.85, max_probability=0.96, max_spread=0.06, harvest_price=0.98, stop_loss_price=0.50),
-        "time-decay-yield": TimeDecayYieldStrategy(target_min_price=0.80, target_max_price=0.95, max_spread=0.06, harvest_price=0.98, stop_loss_price=0.50),
-        "spread-harvesting": SpreadHarvestingMarketMaker(min_spread=0.04, max_spread=0.15),
-        "complement-arbitrage": ComplementArbitrageStrategy(min_edge=0.01),
+        # 5. Yield Harvesting & Arbitrage (Protected from esports traps, strict positive maker edge)
+        "favorite-yield": FavoriteYieldStrategy(min_probability=0.86, max_probability=0.96, max_spread=0.04, min_depth=3.0, harvest_price=0.98, stop_loss_price=0.50, min_stop_loss_bid=0.20),
+        "time-decay-yield": TimeDecayYieldStrategy(target_min_price=0.82, target_max_price=0.95, max_spread=0.04, min_depth=3.0, harvest_price=0.98, stop_loss_price=0.50, min_stop_loss_bid=0.20),
+        "spread-harvesting": SpreadHarvestingMarketMaker(min_spread=0.04, max_spread=0.08, min_profit=0.015),
+        "complement-arbitrage": ComplementArbitrageStrategy(min_edge=0.005),
     }
 
     strategy_baskets = {
-        # Diversified strategies evaluate ALL active categories across the entire discovery universe
+        # High-capacity statistical and microstructure strategies evaluate ALL active categories
+        "mean-reversion": {"all"},
+        "volume-mean-reversion": {"all"},
         "bollinger-reversion": {"all"},
         "bollinger-deep-oversold": {"all"},
-        "mean-reversion": {"all"},
-        "threshold": {"all"},
         "orderbook-imbalance": {"all"},
-        "vwap-pullback": {"all"},
-        "spread-harvesting": {"all"},
+        "order-flow-imbalance": {"all"},
+        "threshold": {"all"},
         "complement-arbitrage": {"all"},
 
         # Market-specific strategies: Anchored / bounded macro series and temperature brackets
         "stable-high-probability": {"macro_finance", "weather"},
         "stable-conservative-80": {"macro_finance", "weather"},
 
-        # Market-specific strategies: Dynamic in-play events and live sports / esports
-        "jump-following": {"sports", "esports"},
-        "momentum": {"sports", "esports"},
+        # Yield harvesting: Macro, weather, and settled sports (STRICTLY NO esports)
+        "favorite-yield": {"macro_finance", "weather", "sports"},
+        "time-decay-yield": {"macro_finance", "weather"},
 
-        # Directional trend strategies: Trending macro contracts and sports spreads
+        # Directional trend & shock strategies
+        "jump-following": {"sports", "esports"},
+        "momentum": {"sports"},
         "ema-crossover": {"macro_finance", "sports"},
         "range-breakout": {"macro_finance", "sports"},
-
-        # Expiration / Yield strategies: Fast-closing contracts and near-settlement favorites
-        "favorite-yield": {"closing_soon", "sports", "macro_finance"},
-        "time-decay-yield": {"closing_soon"},
+        "vwap-pullback": {"macro_finance", "sports"},
+        "spread-harvesting": {"macro_finance", "weather", "sports"},
     }
 
     strategy = MultiStrategy(
