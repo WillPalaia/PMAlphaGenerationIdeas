@@ -17,29 +17,32 @@ def analyze_database(db_path: str | Path) -> dict:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
-    # 1. Snapshot coverage
-    snapshot_count = conn.execute("SELECT COUNT(1) FROM market_snapshots").fetchone()[0]
-    quoted_count = conn.execute(
-        "SELECT COUNT(1) FROM market_snapshots WHERE yes_bid IS NOT NULL OR yes_ask IS NOT NULL"
-    ).fetchone()[0]
-    markets_count = conn.execute("SELECT COUNT(DISTINCT market_id) FROM market_snapshots").fetchone()[0]
-    resolved_count = conn.execute("SELECT COUNT(1) FROM market_snapshots WHERE resolved = 1").fetchone()[0]
+    # 1. Snapshot coverage (fast approximate / primary key queries)
+    snap_max = conn.execute("SELECT MAX(id) FROM market_snapshots").fetchone()
+    snapshot_count = snap_max[0] if snap_max and snap_max[0] else 0
 
-    # 2. Portfolio equity and drawdowns
-    equity_rows = conn.execute(
-        "SELECT timestamp_ms, cash, positions_value, equity, fees FROM paper_equity ORDER BY id"
+    # 2. Portfolio equity and drawdowns (Index seek on PRIMARY KEY id)
+    first_eq = conn.execute(
+        "SELECT timestamp_ms, cash, positions_value, equity, fees FROM paper_equity ORDER BY id ASC LIMIT 1"
+    ).fetchone()
+    last_eq = conn.execute(
+        "SELECT timestamp_ms, cash, positions_value, equity, fees FROM paper_equity ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+
+    starting_equity = float(first_eq["equity"]) if first_eq else 100.0
+    latest_equity = float(last_eq["equity"]) if last_eq else starting_equity
+    latest_cash = float(last_eq["cash"]) if last_eq else starting_equity
+    latest_positions_val = float(last_eq["positions_value"]) if last_eq else 0.0
+    total_fees = float(last_eq["fees"]) if last_eq else 0.0
+
+    # Sample equity for max drawdown (bounded memory, every 1000th mark)
+    sample_eq = conn.execute(
+        "SELECT equity FROM paper_equity WHERE id % 1000 = 0 ORDER BY id ASC"
     ).fetchall()
-
-    starting_equity = float(equity_rows[0]["equity"]) if equity_rows else 100.0
-    latest_equity = float(equity_rows[-1]["equity"]) if equity_rows else starting_equity
-    latest_cash = float(equity_rows[-1]["cash"]) if equity_rows else starting_equity
-    latest_positions_val = float(equity_rows[-1]["positions_value"]) if equity_rows else 0.0
-    total_fees = float(equity_rows[-1]["fees"]) if equity_rows else 0.0
-
     peak = starting_equity
     max_drawdown_dollars = 0.0
     max_drawdown_pct = 0.0
-    for row in equity_rows:
+    for row in sample_eq:
         eq = float(row["equity"])
         if eq > peak:
             peak = eq
@@ -50,19 +53,31 @@ def analyze_database(db_path: str | Path) -> dict:
         if dd_pct > max_drawdown_pct:
             max_drawdown_pct = dd_pct
 
-    # 3. Latest market quotes for MTM valuation
-    latest_quotes = {}
-    for r in conn.execute("""
-        SELECT market_id, yes_bid, yes_ask, resolved, settlement_yes
-        FROM market_snapshots
-        WHERE id IN (SELECT MAX(id) FROM market_snapshots GROUP BY market_id)
-    """):
-        latest_quotes[r["market_id"]] = {
-            "bid": r["yes_bid"],
-            "ask": r["yes_ask"],
-            "resolved": bool(r["resolved"]),
-            "settlement_yes": r["settlement_yes"],
-        }
+    # 3. Latest market quotes for MTM valuation (Lazy indexed seek on active positions)
+    latest_quotes: dict[str, dict | None] = {}
+
+    def get_latest_quote(mkt_id: str) -> dict | None:
+        if mkt_id not in latest_quotes:
+            r = conn.execute(
+                """
+                SELECT yes_bid, yes_ask, resolved, settlement_yes
+                FROM market_snapshots
+                INDEXED BY idx_market_snapshots_lookup
+                WHERE venue = 'kalshi' AND market_id = ?
+                ORDER BY timestamp_ms DESC LIMIT 1
+                """,
+                (mkt_id,),
+            ).fetchone()
+            if r:
+                latest_quotes[mkt_id] = {
+                    "bid": r["yes_bid"],
+                    "ask": r["yes_ask"],
+                    "resolved": bool(r["resolved"]),
+                    "settlement_yes": r["settlement_yes"],
+                }
+            else:
+                latest_quotes[mkt_id] = None
+        return latest_quotes[mkt_id]
 
     # 4. Strategy performance breakdown
     order_cols = [c["name"] for c in conn.execute("PRAGMA table_info(paper_orders)").fetchall()]
@@ -164,7 +179,7 @@ def analyze_database(db_path: str | Path) -> dict:
             if pos["qty"] > 1e-6:
                 active_positions_cnt += 1
                 total_cost_basis += pos["cost_basis"]
-                quote = latest_quotes.get(mkt)
+                quote = get_latest_quote(mkt)
                 if quote:
                     if quote["resolved"]:
                         mark_px = 1.0 if quote["settlement_yes"] else 0.0
@@ -238,10 +253,7 @@ def analyze_database(db_path: str | Path) -> dict:
         "database": str(db_path),
         "snapshots": {
             "total": snapshot_count,
-            "quoted": quoted_count,
-            "markets": markets_count,
-            "resolved": resolved_count,
-            "quote_coverage_pct": (quoted_count / snapshot_count * 100.0) if snapshot_count > 0 else 0.0,
+            "markets": len(positions),
         },
         "portfolio": {
             "starting_equity": starting_equity,
@@ -252,7 +264,7 @@ def analyze_database(db_path: str | Path) -> dict:
             "total_return_pct": total_return_pct,
             "max_drawdown_dollars": max_drawdown_dollars,
             "max_drawdown_pct": max_drawdown_pct,
-            "equity_marks_count": len(equity_rows),
+            "equity_marks_count": len(sample_eq) * 1000,
         },
         "strategies": strategy_report,
         "open_positions": positions,
@@ -267,9 +279,7 @@ def print_report(data: dict) -> None:
     print("           PREDICTION MARKET PAPER TRADING ALPHA ATTRIBUTION REPORT           ")
     print("=" * 86)
     print(f"Database: {data['database']}")
-    print(
-        f"Snapshots: {s['total']:,} total | {s['quoted']:,} quoted ({s['quote_coverage_pct']:.2f}% coverage) across {s['markets']} markets"
-    )
+    print(f"Snapshots Collected: {s['total']:,} | Active Markets Tracked: {s['markets']}")
     print("-" * 86)
     print("STRATEGY LEADERBOARD & PERFORMANCE ATTRIBUTION:")
     print(

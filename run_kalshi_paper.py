@@ -21,6 +21,7 @@ from pm_alpha.strategies import (
     MomentumStrategy,
     OrderBookImbalanceStrategy,
     OrderFlowImbalanceStrategy,
+    PennyContrarianStrategy,
     RangeBreakoutStrategy,
     SpreadHarvestingMarketMaker,
     StableHighProbabilityStrategy,
@@ -98,31 +99,32 @@ async def main() -> None:
 
     strategy_definitions = {
         # 1. Statistical Mean Reversion (#1 Alpha Generator: +3.11% Net Return)
-        "mean-reversion": MeanReversionStrategy(lookback=10, deviation=0.04, max_spread=0.06),
-        "volume-mean-reversion": VolumeWeightedMeanReversionStrategy(lookback=12, deviation=0.04, min_depth=3.0, max_spread=0.05, take_profit=0.08, stop_loss=0.10),
-        "bollinger-reversion": BollingerReversionStrategy(lookback=15, entry_z=-2.0, exit_z=0.0, prefix="boll-rev", strategy_name="bollinger-reversion"),
-        "bollinger-deep-oversold": BollingerReversionStrategy(lookback=15, entry_z=-2.5, exit_z=-0.5, prefix="boll-deep", strategy_name="bollinger-deep-oversold"),
+        "mean-reversion": MeanReversionStrategy(lookback=10, deviation=0.04, max_spread=0.06, min_price=0.10, max_price=0.80, min_stop_loss_bid=0.10),
+        "volume-mean-reversion": VolumeWeightedMeanReversionStrategy(lookback=12, deviation=0.04, min_depth=3.0, max_spread=0.05, take_profit=0.08, stop_loss=0.10, min_price=0.10, max_price=0.80, min_stop_loss_bid=0.10),
+        "bollinger-reversion": BollingerReversionStrategy(lookback=15, entry_z=-2.0, exit_z=0.0, prefix="boll-rev", strategy_name="bollinger-reversion", min_price=0.15, max_price=0.80, min_std=0.02, min_stop_loss_bid=0.12),
+        "bollinger-deep-oversold": BollingerReversionStrategy(lookback=15, entry_z=-2.5, exit_z=-0.5, prefix="boll-deep", strategy_name="bollinger-deep-oversold", min_price=0.15, max_price=0.80, min_std=0.02, min_stop_loss_bid=0.12),
 
-        # 2. Microstructure & Order Flow Imbalance (#2 Alpha Generator: +2.13% Net Return)
-        "orderbook-imbalance": OrderBookImbalanceStrategy(imbalance_threshold=0.50, max_spread=0.04, min_depth=4.0),
-        "order-flow-imbalance": OrderFlowImbalanceStrategy(lookback=3, min_cumulative_ofi=6.0, max_spread=0.04, take_profit=0.05, stop_loss=0.06),
-        "jump-following": JumpFollowingStrategy(jump_threshold=0.06, lookback=3, take_profit=0.15, stop_loss=0.10),
+        # 2. Microstructure & Order Flow Imbalance (Confirmed queue pressure, protected stop-loss)
+        "orderbook-imbalance": OrderBookImbalanceStrategy(imbalance_threshold=0.50, max_spread=0.04, min_depth=4.0, min_consecutive=2, exit_imbalance=-0.60, min_price=0.15, max_price=0.75, min_stop_loss_bid=0.12),
+        "order-flow-imbalance": OrderFlowImbalanceStrategy(lookback=3, min_cumulative_ofi=6.0, max_spread=0.04, take_profit=0.05, stop_loss=0.06, min_price=0.15, max_price=0.75, min_stop_loss_bid=0.12),
+        "jump-following": JumpFollowingStrategy(jump_threshold=0.06, lookback=3, take_profit=0.15, stop_loss=0.10, min_price=0.20, max_price=0.75, min_stop_loss_bid=0.15),
+        "penny-contrarian": PennyContrarianStrategy(min_price=0.02, max_price=0.12, min_bid_depth=4.0, take_profit=0.08, stop_loss=0.03),
 
         # 3. Probability Calibration & Low-Volatility Anchoring (Targeted: Macro/Finance & Weather)
-        "stable-high-probability": StableHighProbabilityStrategy(lower_price=0.68, upper_price=0.72, lookback=5, max_range=0.03),
-        "stable-conservative-80": StableHighProbabilityStrategy(lower_price=0.78, upper_price=0.85, lookback=6, max_range=0.03),
+        "stable-high-probability": StableHighProbabilityStrategy(lower_price=0.68, upper_price=0.72, lookback=5, max_range=0.03, min_depth=3.0, min_stop_loss_bid=0.20),
+        "stable-conservative-80": StableHighProbabilityStrategy(lower_price=0.78, upper_price=0.85, lookback=6, max_range=0.03, min_depth=3.0, min_stop_loss_bid=0.20),
         "threshold": BuyBelowThreshold(0.35),
 
-        # 4. Trend & Breakout Momentum
-        "ema-crossover": EmaCrossoverStrategy(fast_span=5, slow_span=20, min_cross_diff=0.015),
-        "range-breakout": RangeBreakoutStrategy(lookback=20, breakout_margin=0.02),
-        "vwap-pullback": VwapPullbackStrategy(lookback=15, pullback_threshold=0.02),
+        # 4. Trend & Breakout Momentum (Enforced price bands and bid floors)
+        "ema-crossover": EmaCrossoverStrategy(fast_span=5, slow_span=20, min_cross_diff=0.015, min_price=0.20, max_price=0.75, min_stop_loss_bid=0.15),
+        "range-breakout": RangeBreakoutStrategy(lookback=20, breakout_margin=0.02, min_price=0.20, max_price=0.75, min_stop_loss_bid=0.15),
+        "vwap-pullback": VwapPullbackStrategy(lookback=15, pullback_threshold=0.02, min_price=0.20, max_price=0.75, min_stop_loss_bid=0.15),
         "momentum": MomentumStrategy(lookback=5, minimum_move=0.03, take_profit=0.15, stop_loss=0.08, max_spread=0.05),
 
         # 5. Yield Harvesting & Arbitrage (Protected from esports traps, strict positive maker edge)
         "favorite-yield": FavoriteYieldStrategy(min_probability=0.86, max_probability=0.96, max_spread=0.04, min_depth=3.0, harvest_price=0.98, stop_loss_price=0.50, min_stop_loss_bid=0.20),
         "time-decay-yield": TimeDecayYieldStrategy(target_min_price=0.82, target_max_price=0.95, max_spread=0.04, min_depth=3.0, harvest_price=0.98, stop_loss_price=0.50, min_stop_loss_bid=0.20),
-        "spread-harvesting": SpreadHarvestingMarketMaker(min_spread=0.04, max_spread=0.08, min_profit=0.015),
+        "spread-harvesting": SpreadHarvestingMarketMaker(min_spread=0.04, max_spread=0.08, min_profit=0.015, min_price=0.15, max_price=0.85),
         "complement-arbitrage": ComplementArbitrageStrategy(min_edge=0.005),
     }
 
@@ -134,6 +136,7 @@ async def main() -> None:
         "bollinger-deep-oversold": {"all"},
         "orderbook-imbalance": {"all"},
         "order-flow-imbalance": {"all"},
+        "penny-contrarian": {"all"},
         "threshold": {"all"},
         "complement-arbitrage": {"all"},
 

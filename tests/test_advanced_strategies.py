@@ -316,3 +316,24 @@ def test_volume_mean_reversion_triggers_on_deep_book_discount():
     assert sells[0].signal == "vmr-reverted-exit"
 
 
+def test_penny_contrarian_strategy_triggers_on_liquid_support_and_exits():
+    from pm_alpha.strategies import PennyContrarianStrategy
+    strategy = PennyContrarianStrategy(min_price=0.02, max_price=0.10, min_bid_depth=5.0, take_profit=0.08)
+
+    # Penny contract with thin bid (bid_size=1 < 5.0) -> no order
+    assert list(strategy.on_snapshot(MarketSnapshot(1, "kalshi", "m1", 0.04, 0.06, 1, 10))) == []
+
+    # Penny contract with strong bid support (bid_size=20 >= 5.0, ask=0.06 within range) -> triggers buy
+    buys = list(strategy.on_snapshot(MarketSnapshot(2, "kalshi", "m1", 0.04, 0.06, 20, 10)))
+    assert len(buys) == 1
+    assert buys[0].side == Side.BUY
+    assert buys[0].signal == "penny-contrarian-entry"
+
+    # Price doubles to bid=0.14 -> triggers take profit
+    sells = list(strategy.on_snapshot(MarketSnapshot(3, "kalshi", "m1", 0.14, 0.16, 10, 10)))
+    assert len(sells) == 1
+    assert sells[0].side == Side.SELL
+    assert sells[0].signal == "penny-take-profit"
+
+
+

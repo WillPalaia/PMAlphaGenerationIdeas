@@ -257,6 +257,9 @@ class MeanReversionStrategy:
         max_orders_per_market: int = 1,
         stop_loss: float = 0.10,
         max_spread: float = 0.08,
+        min_price: float = 0.08,
+        max_price: float = 0.82,
+        min_stop_loss_bid: float = 0.08,
     ):
         if lookback <= 1 or deviation < 0 or quantity <= 0 or max_orders_per_market <= 0 or max_spread <= 0:
             raise ValueError("invalid mean-reversion parameters")
@@ -266,6 +269,9 @@ class MeanReversionStrategy:
         self.max_orders_per_market = max_orders_per_market
         self.stop_loss = stop_loss
         self.max_spread = max_spread
+        self.min_price = min_price
+        self.max_price = max_price
+        self.min_stop_loss_bid = min_stop_loss_bid
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -306,7 +312,11 @@ class MeanReversionStrategy:
                     strategy="mean-reversion",
                 )
                 return
-            elif snapshot.yes_bid <= entry - self.stop_loss and (spread is None or spread <= self.max_spread):
+            elif (
+                snapshot.yes_bid <= entry - self.stop_loss
+                and snapshot.yes_bid >= self.min_stop_loss_bid
+                and (spread is None or spread <= self.max_spread)
+            ):
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -326,7 +336,8 @@ class MeanReversionStrategy:
         # Buy logic
         if len(history) >= self.lookback and snapshot.yes_ask is not None and spread is not None and spread <= self.max_spread:
             if (
-                snapshot.yes_ask <= mean - self.deviation
+                self.min_price <= snapshot.yes_ask <= self.max_price
+                and snapshot.yes_ask <= mean - self.deviation
                 and self._orders.get(key, 0) < self.max_orders_per_market
                 and key not in self._positions
             ):
@@ -367,6 +378,9 @@ class StableHighProbabilityStrategy:
         max_orders_per_market: int = 1,
         take_profit_price: float = 0.95,
         stop_loss_price: float = 0.45,
+        min_stop_loss_bid: float = 0.20,
+        min_depth: float = 1.0,
+        max_spread: float = 0.05,
     ):
         if not 0 < lower_price <= upper_price <= 1:
             raise ValueError("invalid probability band")
@@ -380,9 +394,13 @@ class StableHighProbabilityStrategy:
         self.max_orders_per_market = max_orders_per_market
         self.take_profit_price = take_profit_price
         self.stop_loss_price = stop_loss_price
+        self.min_stop_loss_bid = min_stop_loss_bid
+        self.min_depth = min_depth
+        self.max_spread = max_spread
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
+        self._blacklisted_markets: set[tuple[str, str]] = set()
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
@@ -390,6 +408,7 @@ class StableHighProbabilityStrategy:
         if snapshot.resolved:
             self._positions.pop(key, None)
             self._orders[key] = 0
+            self._blacklisted_markets.discard(key)
             return
 
         if key in self._positions and snapshot.yes_bid is not None:
@@ -409,9 +428,11 @@ class StableHighProbabilityStrategy:
                     strategy="stable-high-probability",
                 )
                 return
-            elif snapshot.yes_bid <= self.stop_loss_price:
+            elif self.min_stop_loss_bid <= snapshot.yes_bid <= self.stop_loss_price:
                 del self._positions[key]
-                self._orders[key] = 0
+                # Lock out stopped-out markets to prevent repeated re-buying of collapsing assets
+                self._blacklisted_markets.add(key)
+                self._orders[key] = self.max_orders_per_market
                 self._counter += 1
                 yield OrderIntent(
                     timestamp_ms=snapshot.timestamp_ms,
@@ -426,7 +447,12 @@ class StableHighProbabilityStrategy:
                 )
                 return
 
-        if snapshot.yes_ask is None:
+        if snapshot.yes_ask is None or snapshot.yes_bid is None:
+            return
+        if key in self._blacklisted_markets:
+            return
+        spread = snapshot.yes_ask - snapshot.yes_bid
+        if spread > self.max_spread or snapshot.ask_size < self.min_depth:
             return
 
         history = self._history.setdefault(key, [])
@@ -592,7 +618,11 @@ class OrderBookImbalanceStrategy:
         max_orders_per_market: int = 1,
         take_profit: float = 0.05,
         stop_loss: float = 0.05,
-        exit_imbalance: float = -0.30,
+        exit_imbalance: float = -0.60,
+        min_price: float = 0.15,
+        max_price: float = 0.75,
+        min_stop_loss_bid: float = 0.12,
+        min_consecutive: int = 1,
     ):
         if not (-1.0 < imbalance_threshold < 1.0):
             raise ValueError("imbalance_threshold must be between -1 and 1")
@@ -606,8 +636,13 @@ class OrderBookImbalanceStrategy:
         self.take_profit = take_profit
         self.stop_loss = stop_loss
         self.exit_imbalance = exit_imbalance
+        self.min_price = min_price
+        self.max_price = max_price
+        self.min_stop_loss_bid = min_stop_loss_bid
+        self.min_consecutive = min_consecutive
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
+        self._consecutive_imbalance: dict[tuple[str, str], int] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
@@ -615,6 +650,7 @@ class OrderBookImbalanceStrategy:
         if snapshot.resolved:
             self._positions.pop(key, None)
             self._orders[key] = 0
+            self._consecutive_imbalance.pop(key, None)
             return
 
         total_depth = (snapshot.bid_size + snapshot.ask_size) if (snapshot.bid_size and snapshot.ask_size) else 0.0
@@ -626,6 +662,7 @@ class OrderBookImbalanceStrategy:
             if snapshot.yes_bid >= entry + self.take_profit:
                 del self._positions[key]
                 self._orders[key] = 0
+                self._consecutive_imbalance.pop(key, None)
                 self._counter += 1
                 yield OrderIntent(
                     timestamp_ms=snapshot.timestamp_ms,
@@ -639,9 +676,13 @@ class OrderBookImbalanceStrategy:
                     strategy="orderbook-imbalance",
                 )
                 return
-            elif imbalance <= self.exit_imbalance or snapshot.yes_bid <= entry - self.stop_loss:
+            elif (
+                (imbalance <= self.exit_imbalance or snapshot.yes_bid <= entry - self.stop_loss)
+                and snapshot.yes_bid >= self.min_stop_loss_bid
+            ):
                 del self._positions[key]
                 self._orders[key] = 0
+                self._consecutive_imbalance.pop(key, None)
                 self._counter += 1
                 yield OrderIntent(
                     timestamp_ms=snapshot.timestamp_ms,
@@ -659,13 +700,22 @@ class OrderBookImbalanceStrategy:
         if snapshot.yes_ask is None or snapshot.yes_bid is None:
             return
         if total_depth < self.min_depth:
+            self._consecutive_imbalance[key] = 0
             return
         spread = snapshot.yes_ask - snapshot.yes_bid
         if spread > self.max_spread:
+            self._consecutive_imbalance[key] = 0
             return
 
+        # Track consecutive confirmed snapshots of queue imbalance
+        if imbalance >= self.imbalance_threshold:
+            self._consecutive_imbalance[key] = self._consecutive_imbalance.get(key, 0) + 1
+        else:
+            self._consecutive_imbalance[key] = 0
+
         if (
-            imbalance >= self.imbalance_threshold
+            self._consecutive_imbalance[key] >= self.min_consecutive
+            and self.min_price <= snapshot.yes_ask <= self.max_price
             and self._orders.get(key, 0) < self.max_orders_per_market
             and snapshot.ask_size > 0
             and key not in self._positions
@@ -703,6 +753,11 @@ class BollingerReversionStrategy:
         max_orders_per_market: int = 1,
         prefix: str = "boll",
         strategy_name: str = "bollinger-reversion",
+        min_price: float = 0.15,
+        max_price: float = 0.80,
+        min_std: float = 0.02,
+        min_stop_loss_bid: float = 0.12,
+        max_spread: float = 0.06,
     ):
         if lookback <= 2 or quantity <= 0 or max_orders_per_market <= 0 or entry_z >= exit_z:
             raise ValueError("invalid bollinger parameters")
@@ -713,6 +768,11 @@ class BollingerReversionStrategy:
         self.max_orders_per_market = max_orders_per_market
         self.prefix = prefix
         self.strategy_name = strategy_name
+        self.min_price = min_price
+        self.max_price = max_price
+        self.min_std = min_std
+        self.min_stop_loss_bid = min_stop_loss_bid
+        self.max_spread = max_spread
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -723,6 +783,13 @@ class BollingerReversionStrategy:
         if price is None:
             return
         key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        spread = (snapshot.yes_ask - snapshot.yes_bid) if (snapshot.yes_ask is not None and snapshot.yes_bid is not None) else None
+
         history = self._history.setdefault(key, [])
         history.append(price)
         if len(history) > self.lookback:
@@ -733,15 +800,18 @@ class BollingerReversionStrategy:
             variance = sum((x - mean) ** 2 for x in history) / (len(history) - 1)
             std = math.sqrt(variance) if variance > 1e-8 else 0.0
 
-            if std > 0:
+            if std >= self.min_std:
                 z = (price - mean) / std
                 pos = self._positions.get(key, 0.0)
 
-                # Buy on oversold
+                # Buy on oversold with price and spread bounds
                 if (
                     z <= self.entry_z
                     and snapshot.yes_ask is not None
+                    and (spread is None or spread <= self.max_spread)
+                    and self.min_price <= snapshot.yes_ask <= self.max_price
                     and self._orders.get(key, 0) < self.max_orders_per_market
+                    and pos <= 0.0
                 ):
                     self._orders[key] = self._orders.get(key, 0) + 1
                     self._positions[key] = pos + self.quantity
@@ -757,8 +827,13 @@ class BollingerReversionStrategy:
                         signal="bollinger-oversold",
                         strategy=self.strategy_name,
                     )
-                # Sell to exit on mean reversion
-                elif z >= self.exit_z and pos > 0 and snapshot.yes_bid is not None:
+                # Sell to exit on mean reversion (require minimum valid bid to avoid dumping into 0.01)
+                elif (
+                    z >= self.exit_z
+                    and pos > 0
+                    and snapshot.yes_bid is not None
+                    and snapshot.yes_bid >= self.min_stop_loss_bid
+                ):
                     sell_qty = pos
                     self._positions[key] = 0.0
                     self._counter += 1
@@ -787,12 +862,14 @@ class RangeBreakoutStrategy:
         self,
         lookback: int = 20,
         breakout_margin: float = 0.02,
-        min_price: float = 0.10,
-        max_price: float = 0.90,
+        min_price: float = 0.20,
+        max_price: float = 0.75,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
         take_profit: float = 0.25,
         parity_target: float = 0.94,
+        min_stop_loss_bid: float = 0.15,
+        max_spread: float = 0.06,
     ):
         if lookback <= 1 or breakout_margin < 0 or quantity <= 0 or max_orders_per_market <= 0:
             raise ValueError("invalid range breakout parameters")
@@ -806,6 +883,8 @@ class RangeBreakoutStrategy:
         self.max_orders_per_market = max_orders_per_market
         self.take_profit = take_profit
         self.parity_target = parity_target
+        self.min_stop_loss_bid = min_stop_loss_bid
+        self.max_spread = max_spread
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -840,7 +919,7 @@ class RangeBreakoutStrategy:
                     strategy="range-breakout",
                 )
                 return
-            elif snapshot.yes_bid <= channel_mid:
+            elif snapshot.yes_bid <= channel_mid and snapshot.yes_bid >= self.min_stop_loss_bid:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -857,7 +936,10 @@ class RangeBreakoutStrategy:
                 )
                 return
 
-        if snapshot.yes_ask is None:
+        if snapshot.yes_ask is None or snapshot.yes_bid is None:
+            return
+        spread = snapshot.yes_ask - snapshot.yes_bid
+        if spread > self.max_spread:
             return
 
         if len(history) >= self.lookback:
@@ -903,6 +985,10 @@ class EmaCrossoverStrategy:
         max_orders_per_market: int = 1,
         take_profit: float = 0.30,
         parity_target: float = 0.95,
+        min_price: float = 0.20,
+        max_price: float = 0.75,
+        min_stop_loss_bid: float = 0.15,
+        max_spread: float = 0.06,
     ):
         if (
             fast_span <= 0
@@ -919,6 +1005,10 @@ class EmaCrossoverStrategy:
         self.max_orders_per_market = max_orders_per_market
         self.take_profit = take_profit
         self.parity_target = parity_target
+        self.min_price = min_price
+        self.max_price = max_price
+        self.min_stop_loss_bid = min_stop_loss_bid
+        self.max_spread = max_spread
         self._fast_ema: dict[tuple[str, str], float] = {}
         self._slow_ema: dict[tuple[str, str], float] = {}
         self._positions: dict[tuple[str, str], float] = {}
@@ -952,7 +1042,7 @@ class EmaCrossoverStrategy:
         # Exit logic: sell if fast EMA falls back below slow EMA (trend reversed) or take profit
         if key in self._positions and snapshot.yes_bid is not None:
             entry = self._positions[key]
-            if current_diff < 0:
+            if current_diff < 0 and snapshot.yes_bid >= self.min_stop_loss_bid:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -988,11 +1078,15 @@ class EmaCrossoverStrategy:
         if current_diff < 0:
             self._was_below[key] = True
 
+        spread = (snapshot.yes_ask - snapshot.yes_bid) if (snapshot.yes_ask is not None and snapshot.yes_bid is not None) else None
+
         # Golden cross: was below or at slow EMA and now separated by at least min_cross_diff
         if (
             self._was_below.get(key, True)
             and current_diff >= self.min_cross_diff
             and snapshot.yes_ask is not None
+            and (spread is None or spread <= self.max_spread)
+            and self.min_price <= snapshot.yes_ask <= self.max_price
             and self._orders.get(key, 0) < self.max_orders_per_market
             and key not in self._positions
         ):
@@ -1030,6 +1124,8 @@ class SpreadHarvestingMarketMaker:
         quantity: float = 1.0,
         aggressiveness: float = 0.50,
         min_profit: float = -0.03,
+        min_price: float = 0.15,
+        max_price: float = 0.85,
     ):
         if min_spread <= 0 or max_spread < min_spread or inventory_skew < 0 or max_inventory <= 0 or quantity <= 0:
             raise ValueError("invalid spread harvesting parameters")
@@ -1040,6 +1136,8 @@ class SpreadHarvestingMarketMaker:
         self.quantity = quantity
         self.aggressiveness = aggressiveness
         self.min_profit = min_profit
+        self.min_price = min_price
+        self.max_price = max_price
         self._inventory: dict[tuple[str, str], float] = {}
         self._average_cost: dict[tuple[str, str], float] = {}
         self._counter = 0
@@ -1087,9 +1185,10 @@ class SpreadHarvestingMarketMaker:
                 signal="mm-harvest-sell",
                 strategy="spread-harvesting",
             )
-        # Buy when inventory is below max and ask satisfies reservation
+        # Buy when inventory is below max and ask satisfies reservation within price bounds
         elif (
             current_inv < self.max_inventory
+            and self.min_price <= snapshot.yes_ask <= self.max_price
             and snapshot.yes_ask <= reservation + spread * self.aggressiveness
         ):
             new_inv = current_inv + self.quantity
@@ -1174,6 +1273,10 @@ class VwapPullbackStrategy:
         take_profit: float = 0.20,
         parity_target: float = 0.92,
         stop_deviation: float = 0.06,
+        min_price: float = 0.20,
+        max_price: float = 0.75,
+        min_stop_loss_bid: float = 0.15,
+        max_spread: float = 0.06,
     ):
         if (
             lookback <= 1
@@ -1191,6 +1294,10 @@ class VwapPullbackStrategy:
         self.take_profit = take_profit
         self.parity_target = parity_target
         self.stop_deviation = stop_deviation
+        self.min_price = min_price
+        self.max_price = max_price
+        self.min_stop_loss_bid = min_stop_loss_bid
+        self.max_spread = max_spread
         self._history: dict[tuple[str, str], list[tuple[float, float]]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -1226,7 +1333,7 @@ class VwapPullbackStrategy:
                     strategy="vwap-pullback",
                 )
                 return
-            elif snapshot.yes_bid < vwap - self.stop_deviation:
+            elif snapshot.yes_bid < vwap - self.stop_deviation and snapshot.yes_bid >= self.min_stop_loss_bid:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -1247,6 +1354,11 @@ class VwapPullbackStrategy:
         size = snapshot.ask_size
         if price is None or size <= 0:
             return
+
+        spread = (snapshot.yes_ask - snapshot.yes_bid) if (snapshot.yes_ask is not None and snapshot.yes_bid is not None) else None
+        if spread is not None and spread > self.max_spread:
+            return
+
         history.append((price, size))
         if len(history) > self.lookback:
             del history[0]
@@ -1261,6 +1373,7 @@ class VwapPullbackStrategy:
 
                 if (
                     is_uptrend
+                    and self.min_price <= price <= self.max_price
                     and price <= vwap - self.pullback_threshold
                     and self._orders.get(key, 0) < self.max_orders_per_market
                     and key not in self._positions
@@ -1297,6 +1410,10 @@ class JumpFollowingStrategy:
         take_profit: float = 0.20,
         parity_target: float = 0.92,
         stop_loss: float = 0.08,
+        min_price: float = 0.20,
+        max_price: float = 0.75,
+        min_stop_loss_bid: float = 0.15,
+        max_spread: float = 0.06,
     ):
         if jump_threshold <= 0 or lookback <= 0 or quantity <= 0 or max_orders_per_market <= 0:
             raise ValueError("invalid jump following parameters")
@@ -1307,6 +1424,10 @@ class JumpFollowingStrategy:
         self.take_profit = take_profit
         self.parity_target = parity_target
         self.stop_loss = stop_loss
+        self.min_price = min_price
+        self.max_price = max_price
+        self.min_stop_loss_bid = min_stop_loss_bid
+        self.max_spread = max_spread
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -1338,7 +1459,7 @@ class JumpFollowingStrategy:
                     strategy="jump-following",
                 )
                 return
-            elif snapshot.yes_bid <= entry - self.stop_loss:
+            elif snapshot.yes_bid <= entry - self.stop_loss and snapshot.yes_bid >= self.min_stop_loss_bid:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -1355,7 +1476,10 @@ class JumpFollowingStrategy:
                 )
                 return
 
-        if snapshot.yes_ask is None:
+        if snapshot.yes_ask is None or snapshot.yes_bid is None:
+            return
+        spread = snapshot.yes_ask - snapshot.yes_bid
+        if spread > self.max_spread:
             return
 
         history = self._history.setdefault(key, [])
@@ -1363,6 +1487,7 @@ class JumpFollowingStrategy:
             price_change = snapshot.yes_ask - history[0]
             if (
                 price_change >= self.jump_threshold
+                and self.min_price <= snapshot.yes_ask <= self.max_price
                 and self._orders.get(key, 0) < self.max_orders_per_market
                 and key not in self._positions
             ):
@@ -1521,6 +1646,9 @@ class OrderFlowImbalanceStrategy:
         max_orders_per_market: int = 1,
         take_profit: float = 0.05,
         stop_loss: float = 0.06,
+        min_price: float = 0.15,
+        max_price: float = 0.75,
+        min_stop_loss_bid: float = 0.12,
     ):
         if lookback <= 0 or min_cumulative_ofi <= 0 or max_spread <= 0 or quantity <= 0:
             raise ValueError("invalid OFI parameters")
@@ -1531,6 +1659,9 @@ class OrderFlowImbalanceStrategy:
         self.max_orders_per_market = max_orders_per_market
         self.take_profit = take_profit
         self.stop_loss = stop_loss
+        self.min_price = min_price
+        self.max_price = max_price
+        self.min_stop_loss_bid = min_stop_loss_bid
         self._prev_book: dict[tuple[str, str], tuple[float, float, float, float]] = {}
         self._ofi_history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
@@ -1569,7 +1700,11 @@ class OrderFlowImbalanceStrategy:
                     strategy="order-flow-imbalance",
                 )
                 return
-            elif snapshot.yes_bid <= entry - self.stop_loss and spread <= self.max_spread:
+            elif (
+                snapshot.yes_bid <= entry - self.stop_loss
+                and snapshot.yes_bid >= self.min_stop_loss_bid
+                and spread <= self.max_spread
+            ):
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -1606,6 +1741,7 @@ class OrderFlowImbalanceStrategy:
         if (
             len(history) == self.lookback
             and cum_ofi >= self.min_cumulative_ofi
+            and self.min_price <= snapshot.yes_ask <= self.max_price
             and spread <= self.max_spread
             and self._orders.get(key, 0) < self.max_orders_per_market
             and key not in self._positions
@@ -1644,6 +1780,9 @@ class VolumeWeightedMeanReversionStrategy:
         max_orders_per_market: int = 1,
         take_profit: float = 0.08,
         stop_loss: float = 0.10,
+        min_price: float = 0.10,
+        max_price: float = 0.80,
+        min_stop_loss_bid: float = 0.10,
     ):
         if lookback <= 1 or deviation < 0 or min_depth <= 0 or max_spread <= 0 or quantity <= 0:
             raise ValueError("invalid volume mean reversion parameters")
@@ -1655,6 +1794,9 @@ class VolumeWeightedMeanReversionStrategy:
         self.max_orders_per_market = max_orders_per_market
         self.take_profit = take_profit
         self.stop_loss = stop_loss
+        self.min_price = min_price
+        self.max_price = max_price
+        self.min_stop_loss_bid = min_stop_loss_bid
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -1693,7 +1835,11 @@ class VolumeWeightedMeanReversionStrategy:
                     strategy="volume-mean-reversion",
                 )
                 return
-            elif snapshot.yes_bid <= entry - self.stop_loss and spread <= self.max_spread:
+            elif (
+                snapshot.yes_bid <= entry - self.stop_loss
+                and snapshot.yes_bid >= self.min_stop_loss_bid
+                and spread <= self.max_spread
+            ):
                 del self._positions[key]
                 self._orders[key] = 0
                 self._counter += 1
@@ -1714,6 +1860,7 @@ class VolumeWeightedMeanReversionStrategy:
         if (
             len(history) >= self.lookback
             and spread <= self.max_spread
+            and self.min_price <= snapshot.yes_ask <= self.max_price
             and snapshot.ask_size >= self.min_depth
             and snapshot.bid_size >= self.min_depth
             and snapshot.yes_ask <= mean - self.deviation
@@ -1738,3 +1885,108 @@ class VolumeWeightedMeanReversionStrategy:
         history.append(snapshot.yes_ask)
         if len(history) > self.lookback * 2:
             del history[:len(history) - self.lookback * 2]
+
+
+class PennyContrarianStrategy:
+    """Contrarian deep-value strategy buying liquid penny contracts with bid support.
+
+    Prediction market longshots (< $0.12) are frequently priced as lottery tickets
+    with wide spreads. When genuine informed demand places heavy depth on the bid
+    (bid size >= min_bid_depth), buys between min_price (0.02) and max_price (0.12)
+    and targets large asymmetric upside (take profit at >= 2x cost or +0.10).
+    """
+
+    def __init__(
+        self,
+        min_price: float = 0.02,
+        max_price: float = 0.12,
+        min_bid_depth: float = 4.0,
+        take_profit: float = 0.10,
+        stop_loss: float = 0.04,
+        quantity: float = 2.0,
+        max_orders_per_market: int = 1,
+        max_spread: float = 0.05,
+    ):
+        if min_price <= 0 or max_price <= min_price or min_bid_depth <= 0 or quantity <= 0:
+            raise ValueError("invalid penny contrarian parameters")
+        self.min_price = min_price
+        self.max_price = max_price
+        self.min_bid_depth = min_bid_depth
+        self.take_profit = take_profit
+        self.stop_loss = stop_loss
+        self.quantity = quantity
+        self.max_orders_per_market = max_orders_per_market
+        self.max_spread = max_spread
+        self._positions: dict[tuple[str, str], float] = {}
+        self._orders: dict[tuple[str, str], int] = {}
+        self._counter = 0
+
+    def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        if snapshot.yes_ask is None or snapshot.yes_bid is None:
+            return
+        spread = snapshot.yes_ask - snapshot.yes_bid
+
+        # Exit logic
+        if key in self._positions:
+            entry = self._positions[key]
+            if snapshot.yes_bid >= entry + self.take_profit or snapshot.yes_bid >= entry * 2.0:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"penny-tp-{self._counter}",
+                    signal="penny-take-profit",
+                    strategy="penny-contrarian",
+                )
+                return
+            elif snapshot.yes_bid <= entry - self.stop_loss and snapshot.yes_bid >= 0.01:
+                del self._positions[key]
+                self._orders[key] = 0
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"penny-sl-{self._counter}",
+                    signal="penny-stop-loss",
+                    strategy="penny-contrarian",
+                )
+                return
+
+        # Entry logic: penny range, verified buyer support in bid book, tight spread
+        if (
+            self.min_price <= snapshot.yes_ask <= self.max_price
+            and spread <= self.max_spread
+            and snapshot.bid_size >= self.min_bid_depth
+            and self._orders.get(key, 0) < self.max_orders_per_market
+            and key not in self._positions
+        ):
+            self._orders[key] = self._orders.get(key, 0) + 1
+            self._positions[key] = snapshot.yes_ask
+            self._counter += 1
+            yield OrderIntent(
+                timestamp_ms=snapshot.timestamp_ms,
+                venue=snapshot.venue,
+                market_id=snapshot.market_id,
+                side=Side.BUY,
+                quantity=self.quantity,
+                limit_price=snapshot.yes_ask,
+                client_order_id=f"penny-buy-{self._counter}",
+                signal="penny-contrarian-entry",
+                strategy="penny-contrarian",
+            )
