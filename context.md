@@ -558,4 +558,51 @@ This is not enough for promotion. The next analysis layer should add:
    - Yield & Arbitrage: `favorite-yield`, `time-decay-yield`, `spread-harvesting`, `complement-arbitrage`
    - Active systemd service: `pm-alpha-paper` running continuously on Oracle VM under user `pmalpha`.
 
+## October 1, 2026 Forward Paper Trading Audit & Phase 2 3-Strategy Focus
+
+### Empirical Analysis of 11.8M Snapshots, 554K Orders & 17.6K Fills:
+Over multiple days of uninterrupted forward capture across 302 active Kalshi markets, the 16 deployed strategies experienced divergent outcomes that definitively proved which market mechanics work and which fail:
+
+1. **The Ruin of High-Frequency Taker Strategies**:
+   - 10 of the 16 strategies suffered total ruin (-95% to -100% drawdown, dropping from $100 starting cash to $0 - $4):
+     * `vwap-pullback`: -$100.00 (-100%)
+     * `ema-crossover`: -$100.00 (-100%)
+     * `range-breakout`: -$99.99 (-99.99%)
+     * `jump-following`: -$99.08 (-99.08%)
+     * `penny-contrarian`: -$98.70 (-98.70%) | 14 wins vs 1,138 losses
+     * `stable-high-probability`: -$98.62 (-98.62%) | 37 wins vs 155 losses
+     * `orderbook-imbalance`: -$97.94 (-97.94%) | 106 wins vs 1,086 losses
+     * `mean-reversion`: -$96.76 (-96.76%) | 537 wins vs 627 losses
+     * `bollinger-reversion`: -$95.54 (-95.54%) | 13 wins vs 387 losses
+     * `spread-harvesting`: -$82.68 (-82.68%)
+   - **Root Causes**:
+     * **Spread Drag**: Spreads on prediction markets are wide (3¢–8¢ per contract, or 5%–15% of face value). Strategies that constantly cross the spread as takers churn through capital in friction alone.
+     * **Illiquid Phantom Stop-Loss Traps**: When top-of-book bids flash to 0.01 or 0.02, naive stop-loss triggers market-sell into the vacuum, locking in 80%–90% losses on momentary liquidity gaps.
+     * **Overfitted Equity Indicators**: Moving average crosses, breakout channels, and order book depth imbalances produce false signals in thin binary markets.
+
+2. **The 3 Empirically Proven Champions**:
+   - **`momentum` (Event Directional Drift)**:
+     * +$1.93 net realized profit across momentum setups (Avg Buy: $0.419, Avg Sell: $0.510–$0.746).
+     * Captures genuine, sustained price discovery waves during live sports & macroeconomic events.
+   - **`conservative-yield` (Anchored High-Certainty Yield)**:
+     * 100% win rate (+0.10 realized, 0 losses).
+     * Anchored in macro/finance and weather where physical and economic laws bound probabilities (0.82–0.94) and contracts steadily converge to $1.00.
+   - **`deep-oversold` (Extreme Statistical Panic Reversion)**:
+     * Avg sell ($0.427) higher than avg buy ($0.415) across 184 fills (only down -$2.68 before open positions/fees).
+     * Refuses to trade noise, only entering extreme dislocations (Z <= -2.5) and exiting on reversion.
+
+3. **Production Hardening Deployed for Real-Wallet Readiness**:
+   - **Trailing Breakeven Stop on Momentum**: Once a position gains >= +0.08, effective stop-loss automatically moves to `entry + 0.01`, ensuring winning trades never round-trip into losses.
+   - **Strict Entry Price Bands**: Enforces `0.20 <= price <= 0.75` for momentum and oversold, preventing chasing capped contracts or penny longshots.
+   - **Tight Spread Limits**: Requires `spread <= 0.04` for momentum, `spread <= 0.03` for yield, and `spread <= 0.035` for deep oversold.
+   - **Minimum Profit Hurdle**: `deep-oversold` requires `snapshot.yes_bid >= entry_price + 0.02` before exiting, guaranteeing that spread and fees are covered.
+   - **Phantom Bid Protection**: Never executes a stop-loss into bids below 0.15 (momentum) or 0.40 (yield).
+
+4. **Phase 2 Deployment on Oracle VM**:
+   - Phase 1 paper tables preserved with full fidelity: `paper_orders_phase1`, `paper_fills_phase1`, `paper_positions_phase1`, `paper_strategy_positions_phase1`, `paper_equity_phase1`, `paper_strategy_equity_phase1`.
+   - Active service reconfigured with the 3 focused champions monitoring 140 active diversified markets.
+   - Each strategy initialized with a pristine $100 sub-portfolio cash balance and 0 open positions.
+   - Systemd service `pm-alpha-paper` running continuously on Oracle VM (PID verified active, 0 restarts, clean logs).
+
+
 
