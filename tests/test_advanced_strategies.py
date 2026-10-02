@@ -336,4 +336,64 @@ def test_penny_contrarian_strategy_triggers_on_liquid_support_and_exits():
     assert sells[0].signal == "penny-take-profit"
 
 
+def test_momentum_strategy_with_trailing_stop_and_price_filter():
+    from pm_alpha.strategies import MomentumStrategy
+    strategy = MomentumStrategy(
+        lookback=2,
+        minimum_move=0.03,
+        take_profit=0.20,
+        stop_loss=0.08,
+        min_price=0.20,
+        max_price=0.75,
+        trailing_stop_activation=0.08,
+        min_stop_loss_bid=0.15,
+        strategy_name="momentum",
+    )
+    # 1. Warmup
+    list(strategy.on_snapshot(MarketSnapshot(1, "kalshi", "m1", 0.39, 0.40, 10, 10)))
+
+    # 2. Buy on momentum at ask=0.45
+    buys = list(strategy.on_snapshot(MarketSnapshot(2, "kalshi", "m1", 0.44, 0.45, 10, 10)))
+    assert len(buys) == 1
+    assert buys[0].strategy == "momentum"
+
+    # 3. Price peaks at bid=0.54 (gain = +0.09 >= trailing_stop_activation of 0.08) -> locks in breakeven (stop=0.46)
+    list(strategy.on_snapshot(MarketSnapshot(3, "kalshi", "m1", 0.54, 0.55, 10, 10)))
+
+    # 4. Price retraces to bid=0.45 (<= eff_stop 0.46) -> exits with preserved profit/breakeven, NOT loss!
+    sells = list(strategy.on_snapshot(MarketSnapshot(4, "kalshi", "m1", 0.45, 0.46, 10, 10)))
+    assert len(sells) == 1
+    assert sells[0].signal == "momentum-stop-loss"
+    assert sells[0].limit_price == 0.45
+
+
+def test_bollinger_reversion_with_min_profit_target():
+    from pm_alpha.strategies import BollingerReversionStrategy
+    strat = BollingerReversionStrategy(
+        lookback=5,
+        entry_z=-1.0,
+        exit_z=0.0,
+        min_profit_target=0.03,
+        min_std=0.01,
+        max_spread=0.05,
+    )
+    # Warmup flat history: 0.50, 0.50, 0.50, 0.50
+    for t in range(4):
+        list(strat.on_snapshot(MarketSnapshot(t, "kalshi", "m1", 0.49, 0.50, 10, 10)))
+
+    # Drop to 0.40 -> triggers oversold buy at ask=0.40
+    buys = list(strat.on_snapshot(MarketSnapshot(5, "kalshi", "m1", 0.38, 0.40, 10, 10)))
+    assert len(buys) == 1
+    assert buys[0].side == Side.BUY
+
+    # Mean is now ~0.48. If bid reverts to 0.41, z >= 0.0, but gain is only 0.01 < min_profit_target (0.03) -> NO exit sell
+    assert list(strat.on_snapshot(MarketSnapshot(6, "kalshi", "m1", 0.41, 0.42, 10, 10))) == []
+
+    # If bid reverts to 0.45 (gain = 0.05 >= 0.03) -> triggers profitable exit sell!
+    sells = list(strat.on_snapshot(MarketSnapshot(7, "kalshi", "m1", 0.45, 0.46, 10, 10)))
+    assert len(sells) == 1
+    assert sells[0].side == Side.SELL
+
+
+
 

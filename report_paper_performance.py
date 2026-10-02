@@ -319,7 +319,12 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
     args = parser.parse_args()
 
-    target_db = args.db_flag or args.database or "data/oracle_latest.sqlite"
+    target_db = args.db_flag or args.database
+    if not target_db:
+        if Path("/var/lib/pm-alpha/market_data.sqlite").exists():
+            target_db = "/var/lib/pm-alpha/market_data.sqlite"
+        else:
+            target_db = "data/oracle_latest.sqlite"
     data = analyze_database(target_db)
     if args.json:
         print(json.dumps(data, indent=2))

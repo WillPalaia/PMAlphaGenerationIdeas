@@ -157,6 +157,11 @@ class MomentumStrategy:
         stop_loss: float = 0.10,
         parity_target: float = 0.94,
         max_spread: float = 0.08,
+        min_price: float = 0.0,
+        max_price: float = 1.0,
+        min_stop_loss_bid: float = 0.0,
+        trailing_stop_activation: float = 0.0,
+        strategy_name: str = "positive-momentum",
     ):
         if lookback <= 0 or minimum_move < 0 or quantity <= 0 or max_spread <= 0:
             raise ValueError("parameters must be positive")
@@ -168,8 +173,14 @@ class MomentumStrategy:
         self.stop_loss = stop_loss
         self.parity_target = parity_target
         self.max_spread = max_spread
+        self.min_price = min_price
+        self.max_price = max_price
+        self.min_stop_loss_bid = min_stop_loss_bid
+        self.trailing_stop_activation = trailing_stop_activation
+        self.strategy_name = strategy_name
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
+        self._peak_bids: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
 
@@ -177,6 +188,7 @@ class MomentumStrategy:
         key = (snapshot.venue, snapshot.market_id)
         if snapshot.resolved:
             self._positions.pop(key, None)
+            self._peak_bids.pop(key, None)
             self._orders[key] = 0
             return
 
@@ -186,8 +198,19 @@ class MomentumStrategy:
 
         if key in self._positions:
             entry = self._positions[key]
-            if snapshot.yes_bid >= self.parity_target or snapshot.yes_bid >= entry + self.take_profit:
+            current_bid = snapshot.yes_bid
+            peak = self._peak_bids.setdefault(key, current_bid)
+            if current_bid > peak:
+                self._peak_bids[key] = current_bid
+                peak = current_bid
+
+            eff_stop = entry - self.stop_loss
+            if self.trailing_stop_activation > 0 and (peak - entry) >= self.trailing_stop_activation:
+                eff_stop = max(eff_stop, entry + 0.01)
+
+            if current_bid >= self.parity_target or current_bid >= entry + self.take_profit:
                 del self._positions[key]
+                self._peak_bids.pop(key, None)
                 self._orders[key] = 0
                 self._counter += 1
                 yield OrderIntent(
@@ -196,14 +219,19 @@ class MomentumStrategy:
                     market_id=snapshot.market_id,
                     side=Side.SELL,
                     quantity=self.quantity,
-                    limit_price=snapshot.yes_bid,
+                    limit_price=current_bid,
                     client_order_id=f"momentum-tp-{self._counter}",
                     signal="momentum-take-profit",
-                    strategy="positive-momentum",
+                    strategy=self.strategy_name,
                 )
                 return
-            elif snapshot.yes_bid <= entry - self.stop_loss and spread <= self.max_spread:
+            elif (
+                current_bid <= eff_stop
+                and current_bid >= self.min_stop_loss_bid
+                and spread <= self.max_spread
+            ):
                 del self._positions[key]
+                self._peak_bids.pop(key, None)
                 self._orders[key] = 0
                 self._counter += 1
                 yield OrderIntent(
@@ -212,10 +240,10 @@ class MomentumStrategy:
                     market_id=snapshot.market_id,
                     side=Side.SELL,
                     quantity=self.quantity,
-                    limit_price=snapshot.yes_bid,
+                    limit_price=current_bid,
                     client_order_id=f"momentum-sl-{self._counter}",
                     signal="momentum-stop-loss",
-                    strategy="positive-momentum",
+                    strategy=self.strategy_name,
                 )
                 return
 
@@ -225,10 +253,13 @@ class MomentumStrategy:
         if (
             history
             and snapshot.yes_ask - history[-1] >= self.minimum_move
+            and self.min_price <= snapshot.yes_ask <= self.max_price
             and self._orders.get(key, 0) < self.max_orders_per_market
+            and key not in self._positions
         ):
             self._orders[key] = self._orders.get(key, 0) + 1
             self._positions[key] = snapshot.yes_ask
+            self._peak_bids[key] = snapshot.yes_bid
             self._counter += 1
             yield OrderIntent(
                 timestamp_ms=snapshot.timestamp_ms,
@@ -239,7 +270,7 @@ class MomentumStrategy:
                 limit_price=snapshot.yes_ask,
                 client_order_id=f"momentum-{self._counter}",
                 signal="positive-momentum",
-                strategy="positive-momentum",
+                strategy=self.strategy_name,
             )
         history.append(snapshot.yes_ask)
         if len(history) > self.lookback:
@@ -758,6 +789,7 @@ class BollingerReversionStrategy:
         min_std: float = 0.02,
         min_stop_loss_bid: float = 0.12,
         max_spread: float = 0.06,
+        min_profit_target: float = 0.0,
     ):
         if lookback <= 2 or quantity <= 0 or max_orders_per_market <= 0 or entry_z >= exit_z:
             raise ValueError("invalid bollinger parameters")
@@ -773,8 +805,10 @@ class BollingerReversionStrategy:
         self.min_std = min_std
         self.min_stop_loss_bid = min_stop_loss_bid
         self.max_spread = max_spread
+        self.min_profit_target = min_profit_target
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
+        self._entry_prices: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
 
@@ -785,6 +819,7 @@ class BollingerReversionStrategy:
         key = (snapshot.venue, snapshot.market_id)
         if snapshot.resolved:
             self._positions.pop(key, None)
+            self._entry_prices.pop(key, None)
             self._orders[key] = 0
             return
 
@@ -815,6 +850,7 @@ class BollingerReversionStrategy:
                 ):
                     self._orders[key] = self._orders.get(key, 0) + 1
                     self._positions[key] = pos + self.quantity
+                    self._entry_prices[key] = snapshot.yes_ask
                     self._counter += 1
                     yield OrderIntent(
                         timestamp_ms=snapshot.timestamp_ms,
@@ -833,9 +869,11 @@ class BollingerReversionStrategy:
                     and pos > 0
                     and snapshot.yes_bid is not None
                     and snapshot.yes_bid >= self.min_stop_loss_bid
+                    and (self.min_profit_target <= 0 or snapshot.yes_bid >= self._entry_prices.get(key, 0.0) + self.min_profit_target)
                 ):
                     sell_qty = pos
                     self._positions[key] = 0.0
+                    self._entry_prices.pop(key, None)
                     self._counter += 1
                     yield OrderIntent(
                         timestamp_ms=snapshot.timestamp_ms,

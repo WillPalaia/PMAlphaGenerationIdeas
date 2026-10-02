@@ -151,13 +151,14 @@ class PaperPortfolio:
             ).fetchone()
             self.cash = float(starting_cash) if reset_cash or not row or float(row[0]) <= 0 else float(row[0])
             self.total_fees = float(row[1]) if row and not reset_cash else 0.0
-            for position in connection.execute(
-                "SELECT venue, market_id, quantity, average_cost, realized_pnl, settled "
-                "FROM paper_positions"
-            ):
-                self.positions[(position[0], position[1])] = PaperPosition(
-                    position[2], position[3], position[4], bool(position[5])
-                )
+            if not reset_cash:
+                for position in connection.execute(
+                    "SELECT venue, market_id, quantity, average_cost, realized_pnl, settled "
+                    "FROM paper_positions"
+                ):
+                    self.positions[(position[0], position[1])] = PaperPosition(
+                        position[2], position[3], position[4], bool(position[5])
+                    )
 
             # Load per-strategy state if available
             has_strat_eq = connection.execute(
@@ -179,7 +180,7 @@ class PaperPortfolio:
             has_strat_pos = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_strategy_positions'"
             ).fetchone()
-            if has_strat_pos:
+            if has_strat_pos and not reset_cash:
                 for spos in connection.execute(
                     "SELECT strategy, venue, market_id, quantity, average_cost, realized_pnl, settled "
                     "FROM paper_strategy_positions"
