@@ -165,6 +165,10 @@ def analyze_database(db_path: str | Path) -> dict:
                 pos["qty"] -= closed_qty
                 pos["cost_basis"] = pos["qty"] * avg_c
 
+    # Check if per-strategy tracking tables exist
+    has_strat_eq = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_strategy_equity'").fetchone() is not None
+    has_strat_pos = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_strategy_positions'").fetchone() is not None
+
     # Calculate MTM, Realized P&L, Unrealized P&L for each strategy
     strategy_report = []
     for strat_name, s in strategies.items():
@@ -198,7 +202,47 @@ def analyze_database(db_path: str | Path) -> dict:
                 mtm_position_val += cur_val
                 unrealized_pnl += (cur_val - pos["cost_basis"])
 
-        net_pnl = realized_pnl + unrealized_pnl - s["fees_paid"]
+        # Ground truth from strategy state tables if available
+        strat_eq_row = conn.execute(
+            "SELECT cash, positions_value, equity, fees FROM paper_strategy_equity WHERE strategy = ? ORDER BY id DESC LIMIT 1",
+            (strat_name,),
+        ).fetchone() if has_strat_eq else None
+
+        active_pnl_row = conn.execute(
+            "SELECT SUM(realized_pnl), COUNT(1) FROM paper_strategy_positions WHERE strategy = ? AND settled = 0",
+            (strat_name,),
+        ).fetchone() if has_strat_pos else None
+
+        settled_pnl_row = conn.execute(
+            "SELECT SUM(realized_pnl), COUNT(1) FROM paper_strategy_positions WHERE strategy = ? AND settled = 1",
+            (strat_name,),
+        ).fetchone() if has_strat_pos else None
+
+        settled_wins_row = conn.execute(
+            "SELECT COUNT(1) FROM paper_strategy_positions WHERE strategy = ? AND settled = 1 AND realized_pnl > 0",
+            (strat_name,),
+        ).fetchone() if has_strat_pos else None
+
+        if strat_eq_row:
+            strat_equity = float(strat_eq_row["equity"])
+            strat_cash = float(strat_eq_row["cash"])
+            mtm_position_val = float(strat_eq_row["positions_value"])
+            fees_paid = float(strat_eq_row["fees"])
+            net_pnl = strat_equity - 100.0
+            ret_pct = net_pnl
+        else:
+            strat_cash = 100.0 - total_cost_basis + realized_pnl - s["fees_paid"]
+            fees_paid = s["fees_paid"]
+            net_pnl = realized_pnl + unrealized_pnl - fees_paid
+            strat_equity = 100.0 + net_pnl
+            ret_pct = net_pnl / 100.0 * 100.0
+
+        active_pnl = float(active_pnl_row[0] or 0.0) if active_pnl_row else realized_pnl
+        settlement_pnl = float(settled_pnl_row[0] or 0.0) if settled_pnl_row else 0.0
+        settled_cnt = int(settled_pnl_row[1] or 0) if settled_pnl_row else 0
+        settled_wins = int(settled_wins_row[0] or 0) if settled_wins_row else 0
+        settled_win_rate = (settled_wins / settled_cnt * 100.0) if settled_cnt > 0 else 0.0
+
         strategy_report.append(
             {
                 "strategy": strat_name,
@@ -209,15 +253,21 @@ def analyze_database(db_path: str | Path) -> dict:
                 "sell_fills": s["sell_fills"],
                 "buy_vol": s["buy_vol"],
                 "sell_vol": s["sell_vol"],
-                "fees": s["fees_paid"],
+                "fees": fees_paid,
                 "active_markets": active_positions_cnt,
                 "cost_basis": total_cost_basis,
                 "mtm_val": mtm_position_val,
+                "cash": strat_cash,
                 "realized_pnl": realized_pnl,
                 "unrealized_pnl": unrealized_pnl,
+                "active_trading_pnl": active_pnl,
+                "settlement_pnl": settlement_pnl,
+                "settled_count": settled_cnt,
+                "settled_wins": settled_wins,
+                "settled_win_rate": settled_win_rate,
                 "net_pnl": net_pnl,
-                "equity": 100.0 + net_pnl,
-                "return_pct": net_pnl / 100.0 * 100.0,
+                "equity": strat_equity,
+                "return_pct": ret_pct,
                 "reject_reasons": dict(s["reject_reasons"]),
             }
         )
@@ -292,6 +342,10 @@ def print_report(data: dict) -> None:
         print(
             f"  #{idx:<4} {st['strategy']:<26} ${st['net_pnl']:<10.2f} {ret_sign}{st['return_pct']:<9.2f}% {st['fills']:<8} {buys_sells:<12} ${st['fees']:<8.4f}"
         )
+        if st.get("settled_count", 0) > 0 or st.get("active_trading_pnl", 0.0) != 0.0:
+            print(f"       ├─ Active Trading P&L: ${st.get('active_trading_pnl', 0.0):+.2f} | Expiration Settlement P&L: ${st.get('settlement_pnl', 0.0):+.2f}")
+            if st.get("settled_count", 0) > 0:
+                print(f"       ├─ Expiration Win Rate: {st.get('settled_win_rate', 0.0):.1f}% ({st.get('settled_wins', 0)} won / {st['settled_count'] - st.get('settled_wins', 0)} lost)")
         if st["reject_reasons"]:
             reasons_str = ", ".join(f"{k}: {v:,}" for k, v in sorted(st["reject_reasons"].items(), key=lambda x: x[1], reverse=True)[:3])
             print(f"       └─ Top Rejections: {reasons_str}")

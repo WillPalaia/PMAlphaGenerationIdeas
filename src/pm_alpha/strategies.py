@@ -412,10 +412,11 @@ class StableHighProbabilityStrategy:
         min_stop_loss_bid: float = 0.20,
         min_depth: float = 1.0,
         max_spread: float = 0.05,
+        stop_loss_confirmations: int = 3,
     ):
         if not 0 < lower_price <= upper_price <= 1:
             raise ValueError("invalid probability band")
-        if lookback <= 0 or max_range < 0 or quantity <= 0 or max_orders_per_market <= 0:
+        if lookback <= 0 or max_range < 0 or quantity <= 0 or max_orders_per_market <= 0 or stop_loss_confirmations <= 0:
             raise ValueError("invalid stable-probability parameters")
         self.lower_price = lower_price
         self.upper_price = upper_price
@@ -428,9 +429,11 @@ class StableHighProbabilityStrategy:
         self.min_stop_loss_bid = min_stop_loss_bid
         self.min_depth = min_depth
         self.max_spread = max_spread
+        self.stop_loss_confirmations = stop_loss_confirmations
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
+        self._consecutive_sl_count: dict[tuple[str, str], int] = {}
         self._blacklisted_markets: set[tuple[str, str]] = set()
         self._counter = 0
 
@@ -440,12 +443,14 @@ class StableHighProbabilityStrategy:
             self._positions.pop(key, None)
             self._orders[key] = 0
             self._blacklisted_markets.discard(key)
+            self._consecutive_sl_count.pop(key, None)
             return
 
         if key in self._positions and snapshot.yes_bid is not None:
             if snapshot.yes_bid >= self.take_profit_price:
                 del self._positions[key]
                 self._orders[key] = 0
+                self._consecutive_sl_count.pop(key, None)
                 self._counter += 1
                 yield OrderIntent(
                     timestamp_ms=snapshot.timestamp_ms,
@@ -460,23 +465,30 @@ class StableHighProbabilityStrategy:
                 )
                 return
             elif self.min_stop_loss_bid <= snapshot.yes_bid <= self.stop_loss_price:
-                del self._positions[key]
-                # Lock out stopped-out markets to prevent repeated re-buying of collapsing assets
-                self._blacklisted_markets.add(key)
-                self._orders[key] = self.max_orders_per_market
-                self._counter += 1
-                yield OrderIntent(
-                    timestamp_ms=snapshot.timestamp_ms,
-                    venue=snapshot.venue,
-                    market_id=snapshot.market_id,
-                    side=Side.SELL,
-                    quantity=self.quantity,
-                    limit_price=snapshot.yes_bid,
-                    client_order_id=f"stable-sl-{self._counter}",
-                    signal="stable-high-stop-loss",
-                    strategy="stable-high-probability",
-                )
-                return
+                sl_cnt = self._consecutive_sl_count.get(key, 0) + 1
+                self._consecutive_sl_count[key] = sl_cnt
+                if sl_cnt >= self.stop_loss_confirmations:
+                    del self._positions[key]
+                    self._consecutive_sl_count.pop(key, None)
+                    # Lock out stopped-out markets to prevent repeated re-buying of collapsing assets
+                    self._blacklisted_markets.add(key)
+                    self._orders[key] = self.max_orders_per_market
+                    self._counter += 1
+                    yield OrderIntent(
+                        timestamp_ms=snapshot.timestamp_ms,
+                        venue=snapshot.venue,
+                        market_id=snapshot.market_id,
+                        side=Side.SELL,
+                        quantity=self.quantity,
+                        limit_price=snapshot.yes_bid,
+                        client_order_id=f"stable-sl-{self._counter}",
+                        signal="stable-high-stop-loss",
+                        strategy="stable-high-probability",
+                    )
+                    return
+            else:
+                # Bid bounced back above stop-loss price or dropped below phantom bid floor
+                self._consecutive_sl_count[key] = 0
 
         if snapshot.yes_ask is None or snapshot.yes_bid is None:
             return
@@ -790,6 +802,8 @@ class BollingerReversionStrategy:
         min_stop_loss_bid: float = 0.12,
         max_spread: float = 0.06,
         min_profit_target: float = 0.0,
+        max_holding_ticks: Optional[int] = None,
+        max_holding_ms: Optional[int] = None,
     ):
         if lookback <= 2 or quantity <= 0 or max_orders_per_market <= 0 or entry_z >= exit_z:
             raise ValueError("invalid bollinger parameters")
@@ -806,9 +820,13 @@ class BollingerReversionStrategy:
         self.min_stop_loss_bid = min_stop_loss_bid
         self.max_spread = max_spread
         self.min_profit_target = min_profit_target
+        self.max_holding_ticks = max_holding_ticks
+        self.max_holding_ms = max_holding_ms
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._entry_prices: dict[tuple[str, str], float] = {}
+        self._entry_timestamps: dict[tuple[str, str], int] = {}
+        self._holding_ticks: dict[tuple[str, str], int] = {}
         self._orders: dict[tuple[str, str], int] = {}
         self._counter = 0
 
@@ -820,10 +838,50 @@ class BollingerReversionStrategy:
         if snapshot.resolved:
             self._positions.pop(key, None)
             self._entry_prices.pop(key, None)
+            self._entry_timestamps.pop(key, None)
+            self._holding_ticks.pop(key, None)
             self._orders[key] = 0
             return
 
         spread = (snapshot.yes_ask - snapshot.yes_bid) if (snapshot.yes_ask is not None and snapshot.yes_bid is not None) else None
+
+        pos = self._positions.get(key, 0.0)
+        if pos > 0:
+            self._holding_ticks[key] = self._holding_ticks.get(key, 0) + 1
+
+        # Check time-decay exit to prevent holding un-reverted dislocated positions into binary expiration
+        held_ticks = self._holding_ticks.get(key, 0)
+        entry_ts = self._entry_timestamps.get(key, snapshot.timestamp_ms)
+        held_ms = snapshot.timestamp_ms - entry_ts
+        is_time_expired = (
+            (self.max_holding_ticks is not None and held_ticks >= self.max_holding_ticks)
+            or (self.max_holding_ms is not None and held_ms >= self.max_holding_ms)
+        )
+
+        if (
+            is_time_expired
+            and pos > 0
+            and snapshot.yes_bid is not None
+            and snapshot.yes_bid >= self.min_stop_loss_bid
+        ):
+            sell_qty = pos
+            self._positions[key] = 0.0
+            self._entry_prices.pop(key, None)
+            self._entry_timestamps.pop(key, None)
+            self._holding_ticks.pop(key, None)
+            self._counter += 1
+            yield OrderIntent(
+                timestamp_ms=snapshot.timestamp_ms,
+                venue=snapshot.venue,
+                market_id=snapshot.market_id,
+                side=Side.SELL,
+                quantity=sell_qty,
+                limit_price=snapshot.yes_bid,
+                client_order_id=f"{self.prefix}-decay-{self._counter}",
+                signal="bollinger-time-decay-exit",
+                strategy=self.strategy_name,
+            )
+            return
 
         history = self._history.setdefault(key, [])
         history.append(price)
@@ -837,7 +895,6 @@ class BollingerReversionStrategy:
 
             if std >= self.min_std:
                 z = (price - mean) / std
-                pos = self._positions.get(key, 0.0)
 
                 # Buy on oversold with price and spread bounds
                 if (
@@ -851,6 +908,8 @@ class BollingerReversionStrategy:
                     self._orders[key] = self._orders.get(key, 0) + 1
                     self._positions[key] = pos + self.quantity
                     self._entry_prices[key] = snapshot.yes_ask
+                    self._entry_timestamps[key] = snapshot.timestamp_ms
+                    self._holding_ticks[key] = 0
                     self._counter += 1
                     yield OrderIntent(
                         timestamp_ms=snapshot.timestamp_ms,
@@ -874,6 +933,8 @@ class BollingerReversionStrategy:
                     sell_qty = pos
                     self._positions[key] = 0.0
                     self._entry_prices.pop(key, None)
+                    self._entry_timestamps.pop(key, None)
+                    self._holding_ticks.pop(key, None)
                     self._counter += 1
                     yield OrderIntent(
                         timestamp_ms=snapshot.timestamp_ms,
@@ -1164,6 +1225,8 @@ class SpreadHarvestingMarketMaker:
         min_profit: float = -0.03,
         min_price: float = 0.15,
         max_price: float = 0.85,
+        prefix: str = "mm",
+        strategy_name: str = "spread-harvesting",
     ):
         if min_spread <= 0 or max_spread < min_spread or inventory_skew < 0 or max_inventory <= 0 or quantity <= 0:
             raise ValueError("invalid spread harvesting parameters")
@@ -1176,17 +1239,24 @@ class SpreadHarvestingMarketMaker:
         self.min_profit = min_profit
         self.min_price = min_price
         self.max_price = max_price
+        self.prefix = prefix
+        self.strategy_name = strategy_name
         self._inventory: dict[tuple[str, str], float] = {}
         self._average_cost: dict[tuple[str, str], float] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._inventory.pop(key, None)
+            self._average_cost.pop(key, None)
+            return
+
         if snapshot.yes_bid is None or snapshot.yes_ask is None:
             return
         spread = snapshot.yes_ask - snapshot.yes_bid
         if not (self.min_spread <= spread <= self.max_spread):
             return
-        key = (snapshot.venue, snapshot.market_id)
         current_inv = self._inventory.get(key, 0.0)
         avg_cost = self._average_cost.get(key, 0.0)
 
@@ -1219,9 +1289,9 @@ class SpreadHarvestingMarketMaker:
                 side=Side.SELL,
                 quantity=sell_qty,
                 limit_price=snapshot.yes_bid,
-                client_order_id=f"mm-sell-{self._counter}",
+                client_order_id=f"{self.prefix}-sell-{self._counter}",
                 signal="mm-harvest-sell",
-                strategy="spread-harvesting",
+                strategy=self.strategy_name,
             )
         # Buy when inventory is below max and ask satisfies reservation within price bounds
         elif (
@@ -1240,9 +1310,9 @@ class SpreadHarvestingMarketMaker:
                 side=Side.BUY,
                 quantity=self.quantity,
                 limit_price=snapshot.yes_ask,
-                client_order_id=f"mm-buy-{self._counter}",
+                client_order_id=f"{self.prefix}-buy-{self._counter}",
                 signal="mm-harvest-buy",
-                strategy="spread-harvesting",
+                strategy=self.strategy_name,
             )
 
 

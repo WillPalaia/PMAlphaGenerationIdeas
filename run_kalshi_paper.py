@@ -98,24 +98,26 @@ async def main() -> None:
     next_discovery = asyncio.get_running_loop().time() + args.discovery_interval
 
     strategy_definitions = {
-        # 1. Event-Driven Directional Momentum (#1 Empirically Verified Realized Alpha: +$1.93 Net Realized PnL)
-        # Rides real-world probability drift during live sports & macro events, protected with trailing breakeven stop.
-        "momentum": MomentumStrategy(
-            lookback=4,
-            minimum_move=0.03,
-            take_profit=0.18,
-            stop_loss=0.08,
-            parity_target=0.92,
-            max_spread=0.04,
+        # 1. Spread-Capturing Market Maker (Passive Microstructure Alpha)
+        # Replaces taker momentum. Captures wide prediction market spreads (3¢-10¢) using inventory skew,
+        # providing liquidity instead of paying the spread.
+        "spread-harvesting": SpreadHarvestingMarketMaker(
+            min_spread=0.03,
+            max_spread=0.10,
+            inventory_skew=0.01,
+            max_inventory=3.0,
+            quantity=1.0,
+            aggressiveness=0.40,
+            min_profit=0.01,
             min_price=0.20,
-            max_price=0.75,
-            min_stop_loss_bid=0.15,
-            trailing_stop_activation=0.08,
-            strategy_name="momentum",
+            max_price=0.80,
+            prefix="mm-harvest",
+            strategy_name="spread-harvesting",
         ),
 
-        # 2. Anchored High-Certainty Yield (100% Win Rate in Forward Paper Trading)
-        # Targets physically and economically anchored contracts in Macro/Finance and Weather, holding until harvest/maturity.
+        # 2. Anchored High-Certainty Yield (Multi-Snapshot Stop-Loss Confirmation)
+        # Targets physically and economically anchored contracts in Macro/Finance and Weather.
+        # Protected with 3-snapshot confirmation to eliminate false stop-outs on momentary quote vacuums.
         "conservative-yield": StableHighProbabilityStrategy(
             lower_price=0.82,
             upper_price=0.94,
@@ -126,10 +128,12 @@ async def main() -> None:
             stop_loss_price=0.55,
             min_stop_loss_bid=0.40,
             max_spread=0.03,
+            stop_loss_confirmations=3,
         ),
 
-        # 3. Extreme Statistical Reversion (Selective Panic Buyer)
-        # Strictly buys extreme dislocations (Z <= -2.5) with tight spread, exiting only on profitable mean reversion.
+        # 3. Extreme Statistical Reversion (Selective Panic Buyer with Mandatory Time-Decay Pre-Expiry Square-Off)
+        # Strictly buys extreme dislocations (Z <= -2.5) with tight spread, exiting on profitable mean reversion.
+        # Enforces a mandatory 120-tick (~20 min) / 2-hour holding bound so un-reverted positions are never held into binary expiration.
         "deep-oversold": BollingerReversionStrategy(
             lookback=15,
             entry_z=-2.5,
@@ -142,11 +146,13 @@ async def main() -> None:
             min_stop_loss_bid=0.15,
             max_spread=0.035,
             min_profit_target=0.02,
+            max_holding_ticks=120,
+            max_holding_ms=7200000,
         ),
     }
 
     strategy_baskets = {
-        "momentum": {"sports", "macro_finance"},
+        "spread-harvesting": {"sports", "macro_finance"},
         "conservative-yield": {"macro_finance", "weather"},
         "deep-oversold": {"macro_finance", "sports"},
     }

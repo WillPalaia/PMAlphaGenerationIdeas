@@ -395,5 +395,59 @@ def test_bollinger_reversion_with_min_profit_target():
     assert sells[0].side == Side.SELL
 
 
+def test_bollinger_reversion_time_decay_exit():
+    from pm_alpha.strategies import BollingerReversionStrategy
+    strat = BollingerReversionStrategy(
+        lookback=5,
+        entry_z=-1.0,
+        exit_z=0.0,
+        min_std=0.01,
+        max_spread=0.05,
+        max_holding_ticks=3,
+        min_stop_loss_bid=0.20,
+    )
+    for t in range(4):
+        list(strat.on_snapshot(MarketSnapshot(t * 1000, "kalshi", "m1", 0.49, 0.50, 10, 10)))
+
+    # Drop to 0.40 -> triggers oversold buy at ask=0.40
+    buys = list(strat.on_snapshot(MarketSnapshot(4000, "kalshi", "m1", 0.38, 0.40, 10, 10)))
+    assert len(buys) == 1
+    assert buys[0].side == Side.BUY
+
+    # Price stays flat at 0.38 / 0.40 without reverting (z stays negative)
+    # Tick 1 after buy
+    assert list(strat.on_snapshot(MarketSnapshot(5000, "kalshi", "m1", 0.38, 0.40, 10, 10))) == []
+    # Tick 2 after buy
+    assert list(strat.on_snapshot(MarketSnapshot(6000, "kalshi", "m1", 0.38, 0.40, 10, 10))) == []
+    # Tick 3 after buy -> hits max_holding_ticks (3) -> triggers time-decay exit!
+    decays = list(strat.on_snapshot(MarketSnapshot(7000, "kalshi", "m1", 0.38, 0.40, 10, 10)))
+    assert len(decays) == 1
+    assert decays[0].side == Side.SELL
+    assert decays[0].limit_price == 0.38
+    assert decays[0].signal == "bollinger-time-decay-exit"
+
+
+def test_spread_harvesting_market_maker_resolution():
+    from pm_alpha.strategies import SpreadHarvestingMarketMaker
+    mm = SpreadHarvestingMarketMaker(
+        min_spread=0.04,
+        max_spread=0.15,
+        prefix="mm-harvest",
+        strategy_name="spread-harvesting",
+    )
+    # Buy when spread is wide (0.45 bid, 0.55 ask)
+    buys = list(mm.on_snapshot(MarketSnapshot(1000, "kalshi", "m1", 0.45, 0.55, 10, 10)))
+    assert len(buys) == 1
+    assert buys[0].signal == "mm-harvest-buy"
+    assert buys[0].strategy == "spread-harvesting"
+    assert ("kalshi", "m1") in mm._inventory
+
+    # Resolution snapshot clears inventory
+    res = list(mm.on_snapshot(MarketSnapshot(2000, "kalshi", "m1", None, None, 0, 0, resolved=True, settlement_yes=1.0)))
+    assert len(res) == 0
+    assert ("kalshi", "m1") not in mm._inventory
+
+
+
 
 

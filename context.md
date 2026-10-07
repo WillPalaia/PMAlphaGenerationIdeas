@@ -604,5 +604,44 @@ Over multiple days of uninterrupted forward capture across 302 active Kalshi mar
    - Each strategy initialized with a pristine $100 sub-portfolio cash balance and 0 open positions.
    - Systemd service `pm-alpha-paper` running continuously on Oracle VM (PID verified active, 0 restarts, clean logs).
 
+## October 7, 2026 Forward Paper Trading Audit & Phase 2 Empirical Results
+
+### Overview of Phase 2 Forward Run:
+- **Total Snapshots Captured:** 20,074,611
+- **Total Orders / Fills:** 3,458 executions (100% marketable top-of-book fill rate)
+- **Settled Binary Markets:** 447 contracts resolved
+- **Total Realized Settlement P&L:** -$96.68 (152 wins, 295 losses; 34.0% win rate)
+- **Total Execution Fees:** $17.53 across 3 strategies
+
+### Strategy Breakdown: Active Trading vs. Binary Expiration Dichotomy:
+
+1. **`deep-oversold` (Bollinger Band Mean Reversion)**:
+   - **Active Intra-day Trading:** **+$10.12** across 152 markets (Profitable!)
+     * Bought dislocated contracts at avg price $0.420 and exited at avg $0.517 (+23.1% markup).
+   - **Binary Expiration Settlement:** **-$68.28** across 192 markets (Only 5.2% win rate: 10 won, 182 lost).
+   - **Ending Equity:** **$38.70 (-61.30%)** | Cash: $32.90 | Open Positions: 19 ($7.49 basis)
+   - **Empirical Lesson:** Mean reversion alpha exists during live active trading, but holding un-reverted positions into binary expiration is devastating. Severe price drops in prediction markets are overwhelmingly driven by real-world news/score shifts rather than liquidity bounces; unclosed dips expire at $0.00 with 94.8% probability.
+   - **Prescription:** Enforce strict time-decay exits (max 2–4 hours or N ticks) and mandatory pre-expiry square-offs. Never allow an oversold contract to ride into settlement.
+
+2. **`conservative-yield` (Favorite-Longshot Yield Harvester)**:
+   - **Binary Expiration Settlement:** **+$4.76** across 120 markets (92.5% win rate: 111 won, 9 lost).
+     * Yielded +$0.115 avg win vs -$0.894 avg loss.
+   - **Active Intra-day Trading:** **-$15.55** across 260 markets.
+   - **Ending Equity:** **$85.66 (-14.34%)** | Cash: $79.43 | Open Positions: 7 ($6.37 basis)
+   - **Empirical Lesson:** Contracts priced 82¢–94¢ are indeed high-certainty favorites that converge to $1.00 at 92.5% frequency. However, naive top-of-book stop-losses during transient quote jitter in thin books caused -$15.55 in premature, unnecessary spread loss.
+   - **Prescription:** Replace single-snapshot stop-losses with a confirmation filter (require at least 3 consecutive snapshots below threshold) or hold to expiry with strict basket diversification.
+
+3. **`momentum` (Order Book Trend Following)**:
+   - **Active Intra-day Trading:** **-$18.90** across 384 markets.
+   - **Binary Expiration Settlement:** **-$28.89** across 154 markets (22.7% win rate).
+   - **Trading Volume & Fees:** 2,367 fills (68% of total volume), **$9.92** in fees (56% of all portfolio fees).
+   - **Ending Equity:** **$47.67 (-52.33%)** | Cash: $42.45 | Open Positions: 15 ($4.83 basis)
+   - **Empirical Lesson:** Pure trend following in retail binary prediction markets is severely negative-EV. Wide bid-ask spreads (2¢–5¢) mean crossing the spread on breakouts causes instant adverse selection, followed by spread loss on exit plus heavy fee drag.
+   - **Prescription:** Decommission taker momentum on Kalshi; pivot resources toward passive spread-capturing market making or cross-outcome complement arbitrage.
+
+### Reporting Bug Discovered & Resolved:
+- `report_paper_performance.py` previously marked settled contracts using `market_snapshots.resolved == 1`. Because the live poller did not persist synthetic resolved snapshots to disk, expired contracts were marked at 100% of cost basis, falsely reporting `deep-oversold` as +$6.27.
+- Updated `report_paper_performance.py` locally and on the Oracle VM to read ground-truth settlement outcomes and cash tracking directly from `paper_strategy_equity` and `paper_strategy_positions`.
+
 
 
