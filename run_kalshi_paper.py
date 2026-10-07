@@ -98,42 +98,42 @@ async def main() -> None:
     next_discovery = asyncio.get_running_loop().time() + args.discovery_interval
 
     strategy_definitions = {
-        # 1. Spread-Capturing Market Maker (Passive Microstructure Alpha)
-        # Replaces taker momentum. Captures wide prediction market spreads (3¢-10¢) using inventory skew,
-        # providing liquidity instead of paying the spread.
+        # 1. Spread-Capturing Market Maker (Strict 1-Lot Inventory to Prevent One-Sided Risk)
+        # Captures wide prediction market spreads (4¢-10¢) using micro-price skew,
+        # with strict 1-contract max inventory per market so it never accumulates toxic inventory.
         "spread-harvesting": SpreadHarvestingMarketMaker(
-            min_spread=0.03,
+            min_spread=0.04,
             max_spread=0.10,
-            inventory_skew=0.01,
-            max_inventory=3.0,
+            inventory_skew=0.02,
+            max_inventory=1.0,
             quantity=1.0,
             aggressiveness=0.40,
-            min_profit=0.01,
+            min_profit=0.02,
             min_price=0.20,
             max_price=0.80,
             prefix="mm-harvest",
             strategy_name="spread-harvesting",
         ),
 
-        # 2. Anchored High-Certainty Yield (Multi-Snapshot Stop-Loss Confirmation)
-        # Targets physically and economically anchored contracts in Macro/Finance and Weather.
-        # Protected with 3-snapshot confirmation to eliminate false stop-outs on momentary quote vacuums.
+        # 2. Pure Hold-to-Maturity Favorite Harvester (Zero Naive Stop-Losses)
+        # Exploits the empirical favorite-longshot bias (85¢-94¢ contracts settle YES >90% of the time).
+        # Eliminates false stop-outs: harvests early if bid reaches 98¢, otherwise holds to expiration.
         "conservative-yield": StableHighProbabilityStrategy(
-            lower_price=0.82,
+            lower_price=0.85,
             upper_price=0.94,
             lookback=6,
             max_range=0.03,
             min_depth=3.0,
             take_profit_price=0.98,
-            stop_loss_price=0.55,
-            min_stop_loss_bid=0.40,
-            max_spread=0.03,
-            stop_loss_confirmations=3,
+            stop_loss_price=None,
+            max_spread=0.025,
+            prefix="conservative-yield",
+            strategy_name="conservative-yield",
         ),
 
         # 3. Extreme Statistical Reversion (Selective Panic Buyer with Mandatory Time-Decay Pre-Expiry Square-Off)
         # Strictly buys extreme dislocations (Z <= -2.5) with tight spread, exiting on profitable mean reversion.
-        # Enforces a mandatory 120-tick (~20 min) / 2-hour holding bound so un-reverted positions are never held into binary expiration.
+        # Enforces a mandatory 120-tick / 2-hour holding bound so un-reverted positions are never held into binary expiration.
         "deep-oversold": BollingerReversionStrategy(
             lookback=15,
             entry_z=-2.5,
@@ -149,12 +149,20 @@ async def main() -> None:
             max_holding_ticks=120,
             max_holding_ms=7200000,
         ),
+
+        # 4. Parity & Dutch Book Arbitrage (Risk-Free Structural Mispricing)
+        # Automatically detects crossed/locked books (bid >= ask) and structural Dutch book anomalies.
+        "complement-arbitrage": ComplementArbitrageStrategy(
+            min_edge=0.0,
+            quantity=1.0,
+        ),
     }
 
     strategy_baskets = {
         "spread-harvesting": {"sports", "macro_finance"},
         "conservative-yield": {"macro_finance", "weather"},
         "deep-oversold": {"macro_finance", "sports"},
+        "complement-arbitrage": {"macro_finance", "sports", "weather", "politics"},
     }
 
     strategy = MultiStrategy(

@@ -45,3 +45,28 @@ def test_stable_strategy_stop_loss_confirmation():
     assert orders_sl[0].side.value == "sell"
     assert orders_sl[0].signal == "stable-high-stop-loss"
 
+
+def test_stable_strategy_hold_to_maturity_no_stop_loss():
+    # Strategy with stop_loss_price=None (Pure Hold to Maturity)
+    strategy = StableHighProbabilityStrategy(
+        lookback=3,
+        max_range=0.03,
+        take_profit_price=0.98,
+        stop_loss_price=None,
+    )
+    # Buy entry
+    for t in (1, 2, 3):
+        list(strategy.on_snapshot(MarketSnapshot(t, "kalshi", "m1", 0.69, 0.70, 10, 10)))
+
+    # Bid drops to 0.40, 0.30, 0.20 -> NO stop loss emitted
+    for t in (4, 5, 6, 7):
+        orders = list(strategy.on_snapshot(MarketSnapshot(t, "kalshi", "m1", 0.30, 0.35, 10, 10)))
+        assert len(orders) == 0
+
+    # Bid rallies to 0.98 -> Take profit emitted!
+    tp_orders = list(strategy.on_snapshot(MarketSnapshot(8, "kalshi", "m1", 0.98, 0.99, 10, 10)))
+    assert len(tp_orders) == 1
+    assert tp_orders[0].side.value == "sell"
+    assert tp_orders[0].signal == "stable-high-take-profit"
+
+

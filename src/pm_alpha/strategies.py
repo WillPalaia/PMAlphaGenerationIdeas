@@ -408,11 +408,13 @@ class StableHighProbabilityStrategy:
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
         take_profit_price: float = 0.95,
-        stop_loss_price: float = 0.45,
+        stop_loss_price: float | None = 0.45,
         min_stop_loss_bid: float = 0.20,
         min_depth: float = 1.0,
         max_spread: float = 0.05,
         stop_loss_confirmations: int = 3,
+        prefix: str = "stable",
+        strategy_name: str = "conservative-yield",
     ):
         if not 0 < lower_price <= upper_price <= 1:
             raise ValueError("invalid probability band")
@@ -430,6 +432,8 @@ class StableHighProbabilityStrategy:
         self.min_depth = min_depth
         self.max_spread = max_spread
         self.stop_loss_confirmations = stop_loss_confirmations
+        self.prefix = prefix
+        self.strategy_name = strategy_name
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
         self._orders: dict[tuple[str, str], int] = {}
@@ -452,6 +456,7 @@ class StableHighProbabilityStrategy:
                 self._orders[key] = 0
                 self._consecutive_sl_count.pop(key, None)
                 self._counter += 1
+                sig = "stable-high-take-profit" if self.prefix == "stable" else f"{self.prefix}-take-profit"
                 yield OrderIntent(
                     timestamp_ms=snapshot.timestamp_ms,
                     venue=snapshot.venue,
@@ -459,12 +464,12 @@ class StableHighProbabilityStrategy:
                     side=Side.SELL,
                     quantity=self.quantity,
                     limit_price=snapshot.yes_bid,
-                    client_order_id=f"stable-tp-{self._counter}",
-                    signal="stable-high-take-profit",
-                    strategy="stable-high-probability",
+                    client_order_id=f"{self.prefix}-tp-{self._counter}",
+                    signal=sig,
+                    strategy=self.strategy_name,
                 )
                 return
-            elif self.min_stop_loss_bid <= snapshot.yes_bid <= self.stop_loss_price:
+            elif self.stop_loss_price is not None and self.min_stop_loss_bid <= snapshot.yes_bid <= self.stop_loss_price:
                 sl_cnt = self._consecutive_sl_count.get(key, 0) + 1
                 self._consecutive_sl_count[key] = sl_cnt
                 if sl_cnt >= self.stop_loss_confirmations:
@@ -474,6 +479,7 @@ class StableHighProbabilityStrategy:
                     self._blacklisted_markets.add(key)
                     self._orders[key] = self.max_orders_per_market
                     self._counter += 1
+                    sig = "stable-high-stop-loss" if self.prefix == "stable" else f"{self.prefix}-stop-loss"
                     yield OrderIntent(
                         timestamp_ms=snapshot.timestamp_ms,
                         venue=snapshot.venue,
@@ -481,9 +487,9 @@ class StableHighProbabilityStrategy:
                         side=Side.SELL,
                         quantity=self.quantity,
                         limit_price=snapshot.yes_bid,
-                        client_order_id=f"stable-sl-{self._counter}",
-                        signal="stable-high-stop-loss",
-                        strategy="stable-high-probability",
+                        client_order_id=f"{self.prefix}-sl-{self._counter}",
+                        signal=sig,
+                        strategy=self.strategy_name,
                     )
                     return
             else:
@@ -512,6 +518,7 @@ class StableHighProbabilityStrategy:
             self._orders[key] = self._orders.get(key, 0) + 1
             self._positions[key] = snapshot.yes_ask
             self._counter += 1
+            sig = "stable-high-probability" if self.prefix == "stable" else f"{self.prefix}-entry"
             yield OrderIntent(
                 timestamp_ms=snapshot.timestamp_ms,
                 venue=snapshot.venue,
@@ -519,9 +526,9 @@ class StableHighProbabilityStrategy:
                 side=Side.BUY,
                 quantity=self.quantity,
                 limit_price=snapshot.yes_ask,
-                client_order_id=f"stable-probability-{self._counter}",
-                signal="stable-high-probability",
-                strategy="stable-high-probability",
+                client_order_id=f"{self.prefix}-entry-{self._counter}",
+                signal=sig,
+                strategy=self.strategy_name,
             )
 
 
