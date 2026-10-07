@@ -643,5 +643,22 @@ Over multiple days of uninterrupted forward capture across 302 active Kalshi mar
 - `report_paper_performance.py` previously marked settled contracts using `market_snapshots.resolved == 1`. Because the live poller did not persist synthetic resolved snapshots to disk, expired contracts were marked at 100% of cost basis, falsely reporting `deep-oversold` as +$6.27.
 - Updated `report_paper_performance.py` locally and on the Oracle VM to read ground-truth settlement outcomes and cash tracking directly from `paper_strategy_equity` and `paper_strategy_positions`.
 
+## October 7, 2026 Deep Strategy Feasibility Audit & Structural Reality
+
+### 10.2M Snapshot Microstructure Findings:
+1. **The Taker Tax**: The average bid-ask spread across 10,281,358 quoted Kalshi snapshots is **$0.2272 (22.7¢)**. Only 22.3% of books have spreads <= 2¢. Crossing the spread as a taker imposes a 15%–25% friction penalty per round trip plus 1% exchange fees.
+2. **The 451 Settled Market Backtest**:
+   - `Baseline Yield (SL=0.55)`: 139 trades, 84.2% win rate, -$1.09 PnL (-$1.45 fees).
+   - `Pure Favorite Harvester (No SL, TP=0.98)`: 117 trades, **90.6% win rate** (106W/11L), -$0.73 PnL (-$1.15 fees).
+   - **The Asymmetric Payoff Hurdle**: Risking 91.5¢ to make 8.8¢ requires a **>91.2% win rate just to break even before fees**, and **>92.1% after fees**.
+   - `Time-Constrained Oversold`: Enforcing 30-tick exits reduced losses from -$9.52 to -$7.15 across 25 markets, but remained solidly negative EV. Binary price drops reflect permanent information repricing rather than mean-reverting liquidity voids.
+
+### Deployed Strategy Basket (Active on Oracle VM):
+1. **`spread-harvesting`**: Capped at `max_inventory = 1.0` contract per market with `min_spread = 0.04` and `min_profit = 0.02` to eliminate one-sided toxic inventory accumulation.
+2. **`conservative-yield`**: Reconfigured as pure hold-to-maturity (`stop_loss_price = None`, `tp_price = 0.98`, `max_spread = 0.025`) to prevent false stop-out destruction in thin books.
+3. **`deep-oversold`**: Maintained with mandatory time-decay exit (`max_holding_ticks = 120`, `max_holding_ms = 7,200,000`) as an experimental control.
+4. **`complement-arbitrage`**: Added across all 151 markets to scan for riskless crossed/locked books and Dutch book parity opportunities.
+
+
 
 
