@@ -22,10 +22,9 @@ Write-Host "Service Status: $serviceStatus" -ForegroundColor $statusColor
 Write-Host "`n[2/3] Checking remote paper database..." -ForegroundColor Yellow
 $remoteScript = @'
 import sqlite3
-c = sqlite3.connect("/var/lib/pm-alpha/market_data.sqlite")
+c = sqlite3.connect("file:/var/lib/pm-alpha/market_data.sqlite?mode=ro", uri=True)
 total_snaps = c.execute("SELECT MAX(id) FROM market_snapshots").fetchone()[0] or 0
-quoted_snaps = c.execute("SELECT COUNT(1) FROM market_snapshots WHERE yes_bid IS NOT NULL OR yes_ask IS NOT NULL").fetchone()[0]
-print(f"Snapshots: {total_snaps:,} total | {quoted_snaps:,} quoted")
+print(f"Total Snapshots: {total_snaps:,}")
 
 eq = c.execute("SELECT cash, positions_value, equity, fees FROM paper_equity ORDER BY id DESC LIMIT 1").fetchone()
 if eq:
