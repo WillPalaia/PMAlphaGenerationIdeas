@@ -407,7 +407,7 @@ class StableHighProbabilityStrategy:
         max_range: float = 0.03,
         quantity: float = 1.0,
         max_orders_per_market: int = 1,
-        take_profit_price: float = 0.95,
+        take_profit_price: float | None = 0.95,
         stop_loss_price: float | None = 0.45,
         min_stop_loss_bid: float = 0.20,
         min_depth: float = 1.0,
@@ -451,7 +451,7 @@ class StableHighProbabilityStrategy:
             return
 
         if key in self._positions and snapshot.yes_bid is not None:
-            if snapshot.yes_bid >= self.take_profit_price:
+            if self.take_profit_price is not None and snapshot.yes_bid >= self.take_profit_price:
                 del self._positions[key]
                 self._orders[key] = 0
                 self._consecutive_sl_count.pop(key, None)
@@ -1234,6 +1234,9 @@ class SpreadHarvestingMarketMaker:
         max_price: float = 0.85,
         prefix: str = "mm",
         strategy_name: str = "spread-harvesting",
+        max_price_jump: float | None = None,
+        max_rolling_range: float | None = None,
+        volatility_lookback: int = 15,
     ):
         if min_spread <= 0 or max_spread < min_spread or inventory_skew < 0 or max_inventory <= 0 or quantity <= 0:
             raise ValueError("invalid spread harvesting parameters")
@@ -1248,8 +1251,12 @@ class SpreadHarvestingMarketMaker:
         self.max_price = max_price
         self.prefix = prefix
         self.strategy_name = strategy_name
+        self.max_price_jump = max_price_jump
+        self.max_rolling_range = max_rolling_range
+        self.volatility_lookback = volatility_lookback
         self._inventory: dict[tuple[str, str], float] = {}
         self._average_cost: dict[tuple[str, str], float] = {}
+        self._price_history: dict[tuple[str, str], list[float]] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
@@ -1257,12 +1264,28 @@ class SpreadHarvestingMarketMaker:
         if snapshot.resolved:
             self._inventory.pop(key, None)
             self._average_cost.pop(key, None)
+            self._price_history.pop(key, None)
             return
 
         if snapshot.yes_bid is None or snapshot.yes_ask is None:
             return
         spread = snapshot.yes_ask - snapshot.yes_bid
         if not (self.min_spread <= spread <= self.max_spread):
+            return
+
+        # Anti-courtsiding & volatility protection
+        mid = (snapshot.yes_bid + snapshot.yes_ask) / 2.0
+        hist = self._price_history.setdefault(key, [])
+        hist.append(mid)
+        if len(hist) > self.volatility_lookback:
+            del hist[0]
+
+        # 1. Price jump check (detect sudden news / score / courtsiding repricing)
+        if self.max_price_jump is not None and len(hist) >= 2 and abs(hist[-1] - hist[-2]) > self.max_price_jump:
+            return
+
+        # 2. Rolling range check (detect choppy or volatile environments)
+        if self.max_rolling_range is not None and len(hist) == self.volatility_lookback and (max(hist) - min(hist)) > self.max_rolling_range:
             return
         current_inv = self._inventory.get(key, 0.0)
         avg_cost = self._average_cost.get(key, 0.0)

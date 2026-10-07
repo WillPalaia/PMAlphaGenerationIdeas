@@ -98,9 +98,11 @@ async def main() -> None:
     next_discovery = asyncio.get_running_loop().time() + args.discovery_interval
 
     strategy_definitions = {
-        # 1. Spread-Capturing Market Maker (Strict 1-Lot Inventory to Prevent One-Sided Risk)
-        # Captures wide prediction market spreads (4¢-10¢) using micro-price skew,
-        # with strict 1-contract max inventory per market so it never accumulates toxic inventory.
+        # 1. Spread-Capturing Market Maker (Anti-Courtsiding, Low-Volatility Only)
+        # Quoting ONLY in slow, non-volatile sectors (Weather & Macro/Finance; NO live sports).
+        # Equipped with price-jump detection (max_price_jump=0.01) and rolling-range bounds (max_rolling_range=0.02)
+        # to pull quotes in advance of volatility and prevent latency/courtsiding exploitation.
+        # Strict 1-contract max inventory per market.
         "spread-harvesting": SpreadHarvestingMarketMaker(
             min_spread=0.04,
             max_spread=0.10,
@@ -111,28 +113,31 @@ async def main() -> None:
             min_profit=0.02,
             min_price=0.20,
             max_price=0.80,
+            max_price_jump=0.01,
+            max_rolling_range=0.02,
+            volatility_lookback=15,
             prefix="mm-harvest",
             strategy_name="spread-harvesting",
         ),
 
-        # 2. Pure Hold-to-Maturity Favorite Harvester (Zero Naive Stop-Losses)
-        # Exploits the empirical favorite-longshot bias (85¢-94¢ contracts settle YES >90% of the time).
-        # Eliminates false stop-outs: harvests early if bid reaches 98¢, otherwise holds to expiration.
+        # 2. Pure Hold-to-Maturity Favorite Harvester (Zero Exits, Strict 1-Cent Spread Taker Hurdle)
+        # NEVER sells early: zero stop-loss and zero take-profit. Holds 100% of contracts strictly to maturity.
+        # Taker entry ONLY when spread is exactly 1 cent (max_spread=0.01) to eliminate spread friction.
         "conservative-yield": StableHighProbabilityStrategy(
             lower_price=0.85,
             upper_price=0.94,
             lookback=6,
             max_range=0.03,
             min_depth=3.0,
-            take_profit_price=0.98,
+            take_profit_price=None,
             stop_loss_price=None,
-            max_spread=0.025,
+            max_spread=0.01,
             prefix="conservative-yield",
             strategy_name="conservative-yield",
         ),
 
-        # 3. Extreme Statistical Reversion (Selective Panic Buyer with Mandatory Time-Decay Pre-Expiry Square-Off)
-        # Strictly buys extreme dislocations (Z <= -2.5) with tight spread, exiting on profitable mean reversion.
+        # 3. Extreme Statistical Reversion (Strict 1-Cent Spread Taker Hurdle with Time Decay)
+        # Taker entry ONLY when spread is exactly 1 cent (max_spread=0.01) on extreme dislocations (Z <= -2.5).
         # Enforces a mandatory 120-tick / 2-hour holding bound so un-reverted positions are never held into binary expiration.
         "deep-oversold": BollingerReversionStrategy(
             lookback=15,
@@ -144,14 +149,14 @@ async def main() -> None:
             max_price=0.75,
             min_std=0.02,
             min_stop_loss_bid=0.15,
-            max_spread=0.035,
+            max_spread=0.01,
             min_profit_target=0.02,
             max_holding_ticks=120,
             max_holding_ms=7200000,
         ),
 
-        # 4. Parity & Dutch Book Arbitrage (Risk-Free Structural Mispricing)
-        # Automatically detects crossed/locked books (bid >= ask) and structural Dutch book anomalies.
+        # 4. Parity & Dutch Book Arbitrage (Risk-Free Structural Mispricing across All Markets)
+        # Scans EVERY market discovered (all categories, zero basket limits) for locked/crossed books.
         "complement-arbitrage": ComplementArbitrageStrategy(
             min_edge=0.0,
             quantity=1.0,
@@ -159,10 +164,12 @@ async def main() -> None:
     }
 
     strategy_baskets = {
-        "spread-harvesting": {"sports", "macro_finance"},
+        # Exclude sports from market making completely! Only quote slow, non-courtsided markets
+        "spread-harvesting": {"macro_finance", "weather"},
         "conservative-yield": {"macro_finance", "weather"},
         "deep-oversold": {"macro_finance", "sports"},
-        "complement-arbitrage": {"macro_finance", "sports", "weather", "politics"},
+        # Arbitrage scans across ALL markets without restriction
+        "complement-arbitrage": "all",
     }
 
     strategy = MultiStrategy(

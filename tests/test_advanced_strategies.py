@@ -448,6 +448,25 @@ def test_spread_harvesting_market_maker_resolution():
     assert ("kalshi", "m1") not in mm._inventory
 
 
+def test_spread_harvesting_anti_courtsiding_volatility_filter():
+    from pm_alpha.strategies import SpreadHarvestingMarketMaker
+    mm = SpreadHarvestingMarketMaker(
+        min_spread=0.04,
+        max_spread=0.15,
+        max_price_jump=0.01,
+        max_rolling_range=0.02,
+        volatility_lookback=5,
+    )
+    # Tick 1: Stable market (mid = 0.50)
+    intents1 = list(mm.on_snapshot(MarketSnapshot(1000, "kalshi", "m1", 0.45, 0.55, 10, 10)))
+    assert len(intents1) == 1
+
+    # Tick 2: Sudden jump from news/courtsiding (mid jumps from 0.50 to 0.55, jump = 0.05 > 0.01)
+    intents_jump = list(mm.on_snapshot(MarketSnapshot(2000, "kalshi", "m1", 0.50, 0.60, 10, 10)))
+    assert len(intents_jump) == 0  # Market maker freezes and refuses to quote!
+
+
+
 
 
 
