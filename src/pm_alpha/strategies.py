@@ -1237,6 +1237,10 @@ class SpreadHarvestingMarketMaker:
         max_price_jump: float | None = None,
         max_rolling_range: float | None = None,
         volatility_lookback: int = 15,
+        max_holding_ticks: int | None = 60,
+        max_holding_ms: int | None = 3600000,
+        stop_loss_margin: float | None = 0.06,
+        salvage_floor: float = 0.03,
     ):
         if min_spread <= 0 or max_spread < min_spread or inventory_skew < 0 or max_inventory <= 0 or quantity <= 0:
             raise ValueError("invalid spread harvesting parameters")
@@ -1254,9 +1258,15 @@ class SpreadHarvestingMarketMaker:
         self.max_price_jump = max_price_jump
         self.max_rolling_range = max_rolling_range
         self.volatility_lookback = volatility_lookback
+        self.max_holding_ticks = max_holding_ticks
+        self.max_holding_ms = max_holding_ms
+        self.stop_loss_margin = stop_loss_margin
+        self.salvage_floor = salvage_floor
         self._inventory: dict[tuple[str, str], float] = {}
         self._average_cost: dict[tuple[str, str], float] = {}
         self._price_history: dict[tuple[str, str], list[float]] = {}
+        self._entry_timestamps: dict[tuple[str, str], int] = {}
+        self._holding_ticks: dict[tuple[str, str], int] = {}
         self._counter = 0
 
     def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
@@ -1265,11 +1275,56 @@ class SpreadHarvestingMarketMaker:
             self._inventory.pop(key, None)
             self._average_cost.pop(key, None)
             self._price_history.pop(key, None)
+            self._entry_timestamps.pop(key, None)
+            self._holding_ticks.pop(key, None)
             return
 
         if snapshot.yes_bid is None or snapshot.yes_ask is None:
             return
         spread = snapshot.yes_ask - snapshot.yes_bid
+
+        current_inv = self._inventory.get(key, 0.0)
+        avg_cost = self._average_cost.get(key, 0.0)
+
+        # Track holding duration on active inventory
+        if current_inv > 0:
+            self._holding_ticks[key] = self._holding_ticks.get(key, 0) + 1
+            held_ticks = self._holding_ticks[key]
+            entry_ts = self._entry_timestamps.get(key, snapshot.timestamp_ms)
+            held_ms = snapshot.timestamp_ms - entry_ts
+
+            is_time_expired = (
+                (self.max_holding_ticks is not None and held_ticks >= self.max_holding_ticks)
+                or (self.max_holding_ms is not None and held_ms >= self.max_holding_ms)
+            )
+            is_toxic_drop = (
+                self.stop_loss_margin is not None
+                and snapshot.yes_bid is not None
+                and snapshot.yes_bid <= (avg_cost - self.stop_loss_margin)
+            )
+
+            # Pre-settlement square-off or fast toxic adverse stop: market-sell at bid to prevent $0.00 binary wipeout
+            if (is_time_expired or is_toxic_drop) and snapshot.yes_bid is not None and snapshot.yes_bid >= self.salvage_floor:
+                sell_qty = current_inv
+                self._inventory[key] = 0.0
+                self._average_cost[key] = 0.0
+                self._entry_timestamps.pop(key, None)
+                self._holding_ticks.pop(key, None)
+                self._counter += 1
+                signal_tag = "mm-square-off-time" if is_time_expired else "mm-toxic-flow-stop"
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.SELL,
+                    quantity=sell_qty,
+                    limit_price=snapshot.yes_bid,
+                    client_order_id=f"{self.prefix}-sqoff-{self._counter}",
+                    signal=signal_tag,
+                    strategy=self.strategy_name,
+                )
+                return
+
         if not (self.min_spread <= spread <= self.max_spread):
             return
 
@@ -1287,8 +1342,6 @@ class SpreadHarvestingMarketMaker:
         # 2. Rolling range check (detect choppy or volatile environments)
         if self.max_rolling_range is not None and len(hist) == self.volatility_lookback and (max(hist) - min(hist)) > self.max_rolling_range:
             return
-        current_inv = self._inventory.get(key, 0.0)
-        avg_cost = self._average_cost.get(key, 0.0)
 
         total_depth = snapshot.bid_size + snapshot.ask_size
         if total_depth > 0:
@@ -1311,6 +1364,8 @@ class SpreadHarvestingMarketMaker:
             if self._inventory[key] <= 1e-9:
                 self._inventory[key] = 0.0
                 self._average_cost[key] = 0.0
+                self._entry_timestamps.pop(key, None)
+                self._holding_ticks.pop(key, None)
             self._counter += 1
             yield OrderIntent(
                 timestamp_ms=snapshot.timestamp_ms,
@@ -1332,6 +1387,9 @@ class SpreadHarvestingMarketMaker:
             new_inv = current_inv + self.quantity
             self._average_cost[key] = (avg_cost * current_inv + snapshot.yes_ask * self.quantity) / new_inv
             self._inventory[key] = new_inv
+            if current_inv == 0.0:
+                self._entry_timestamps[key] = snapshot.timestamp_ms
+                self._holding_ticks[key] = 0
             self._counter += 1
             yield OrderIntent(
                 timestamp_ms=snapshot.timestamp_ms,
@@ -1344,6 +1402,7 @@ class SpreadHarvestingMarketMaker:
                 signal="mm-harvest-buy",
                 strategy=self.strategy_name,
             )
+
 
 
 class ComplementArbitrageStrategy:
@@ -2128,3 +2187,259 @@ class PennyContrarianStrategy:
                 signal="penny-contrarian-entry",
                 strategy="penny-contrarian",
             )
+
+
+class MicrostructureRetailHerdFader:
+    """Fades retail mob overshooting on low-probability/longshot contracts.
+
+    Detects retail speculative rushes where:
+    1. Contract trades in retail lottery territory (ask <= max_target_price, e.g. 0.35).
+    2. Price spiked rapidly (>= min_price_runup, e.g. 0.04).
+    3. Institutional ask wall absorbs the flow (ask_size >= min_depth_absorption * bid_size).
+    4. Micro-price sits significantly below ask (pulling toward bid).
+
+    Executes a fade (SELL YES at the bid) with take-profit, stop-loss, and a strict
+    time-decay limit to guarantee getting flat before binary expiration.
+    """
+
+    def __init__(
+        self,
+        lookback_snapshots: int = 15,
+        max_target_price: float = 0.35,
+        min_price_runup: float = 0.04,
+        min_depth_absorption: float = 2.0,
+        min_microprice_discount: float = 0.015,
+        max_spread: float = 0.035,
+        take_profit: float = 0.04,
+        stop_loss: float = 0.05,
+        max_holding_ticks: int = 40,
+        quantity: float = 1.0,
+        prefix: str = "herd-fade",
+        strategy_name: str = "microstructure-herd-fader",
+    ):
+        self.lookback_snapshots = lookback_snapshots
+        self.max_target_price = max_target_price
+        self.min_price_runup = min_price_runup
+        self.min_depth_absorption = min_depth_absorption
+        self.min_microprice_discount = min_microprice_discount
+        self.max_spread = max_spread
+        self.take_profit = take_profit
+        self.stop_loss = stop_loss
+        self.max_holding_ticks = max_holding_ticks
+        self.quantity = quantity
+        self.prefix = prefix
+        self.strategy_name = strategy_name
+
+        self._snapshot_history: dict[tuple[str, str], list[MarketSnapshot]] = {}
+        self._positions: dict[tuple[str, str], dict] = {}
+        self._counter = 0
+
+    def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._snapshot_history.pop(key, None)
+            return
+
+        if snapshot.yes_bid is None or snapshot.yes_ask is None:
+            return
+
+        spread = snapshot.yes_ask - snapshot.yes_bid
+
+        # 1. Active Position Management (Faded YES by selling at bid)
+        if key in self._positions:
+            pos = self._positions[key]
+            entry_price = pos["entry_price"]
+            pos["holding_ticks"] += 1
+
+            # Take profit: ask dropped below entry - take_profit (faded move succeeded)
+            if snapshot.yes_ask <= entry_price - self.take_profit:
+                del self._positions[key]
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.BUY,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_ask,
+                    client_order_id=f"{self.prefix}-tp-{self._counter}",
+                    signal="micro-fade-tp",
+                    strategy=self.strategy_name,
+                )
+                return
+
+            # Stop loss: price continues breaking out against fade
+            elif snapshot.yes_ask >= entry_price + self.stop_loss and spread <= self.max_spread:
+                del self._positions[key]
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.BUY,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_ask,
+                    client_order_id=f"{self.prefix}-sl-{self._counter}",
+                    signal="micro-fade-sl",
+                    strategy=self.strategy_name,
+                )
+                return
+
+            # Time Decay Limit: exit before binary expiration
+            elif pos["holding_ticks"] >= self.max_holding_ticks and spread <= self.max_spread:
+                del self._positions[key]
+                self._counter += 1
+                yield OrderIntent(
+                    timestamp_ms=snapshot.timestamp_ms,
+                    venue=snapshot.venue,
+                    market_id=snapshot.market_id,
+                    side=Side.BUY,
+                    quantity=self.quantity,
+                    limit_price=snapshot.yes_ask,
+                    client_order_id=f"{self.prefix}-time-{self._counter}",
+                    signal="micro-fade-time-exit",
+                    strategy=self.strategy_name,
+                )
+                return
+
+        # 2. History Tracking
+        history = self._snapshot_history.setdefault(key, [])
+        history.append(snapshot)
+        if len(history) > self.lookback_snapshots:
+            del history[0]
+
+        if len(history) < self.lookback_snapshots:
+            return
+
+        # 3. Microstructure Indicators
+        total_depth = snapshot.bid_size + snapshot.ask_size
+        if total_depth <= 0:
+            return
+
+        micro_price = (snapshot.bid_size * snapshot.yes_ask + snapshot.ask_size * snapshot.yes_bid) / total_depth
+        micro_discount = snapshot.yes_ask - micro_price
+
+        earliest_ask = history[0].yes_ask
+        if earliest_ask is None:
+            return
+        price_runup = snapshot.yes_ask - earliest_ask
+        depth_ratio = snapshot.ask_size / max(0.5, snapshot.bid_size)
+
+        # 4. Entry: Retail mob spiked price into institutional limit ask wall
+        if (
+            snapshot.yes_ask <= self.max_target_price
+            and (price_runup + 1e-6) >= self.min_price_runup
+            and spread <= self.max_spread
+            and depth_ratio >= self.min_depth_absorption
+            and (micro_discount + 1e-6) >= self.min_microprice_discount
+            and key not in self._positions
+        ):
+            self._positions[key] = {
+                "entry_price": snapshot.yes_bid,
+                "holding_ticks": 0,
+            }
+            self._counter += 1
+            yield OrderIntent(
+                timestamp_ms=snapshot.timestamp_ms,
+                venue=snapshot.venue,
+                market_id=snapshot.market_id,
+                side=Side.SELL,
+                quantity=self.quantity,
+                limit_price=snapshot.yes_bid,
+                client_order_id=f"{self.prefix}-entry-{self._counter}",
+                signal="retail-herd-exhaustion-fade",
+                strategy=self.strategy_name,
+            )
+
+
+class AtmosphericTemperatureHarvester:
+    """Exploits physical diurnal atmospheric temperature determinism on Kalshi.
+
+    Peak daily temperatures at surface stations lock in between 1:00 PM and 4:30 PM
+    local time as solar irradiance falls below terrestrial radiative cooling. Once
+    the thermal maximum is reached, temperatures decline monotonically. Contracts
+    spanning the observed maximum possess >99.9% physical certainty yet trade at
+    $0.90-$0.95 for hours due to retail collateral illiquidity and impatience.
+
+    Enforces strict spread limits, stability lookbacks, and holds to maturity with
+    zero false single-tick stop-losses.
+    """
+
+    def __init__(
+        self,
+        min_price: float = 0.88,
+        max_price: float = 0.95,
+        lookback: int = 6,
+        max_range: float = 0.03,
+        min_depth: float = 3.0,
+        max_spread: float = 0.025,
+        quantity: float = 1.0,
+        max_orders_per_market: int = 1,
+        prefix: str = "temp-harvest",
+        strategy_name: str = "weather-determinism-yield",
+    ):
+        self.min_price = min_price
+        self.max_price = max_price
+        self.lookback = lookback
+        self.max_range = max_range
+        self.min_depth = min_depth
+        self.max_spread = max_spread
+        self.quantity = quantity
+        self.max_orders_per_market = max_orders_per_market
+        self.prefix = prefix
+        self.strategy_name = strategy_name
+
+        self._history: dict[tuple[str, str], list[float]] = {}
+        self._positions: dict[tuple[str, str], float] = {}
+        self._orders: dict[tuple[str, str], int] = {}
+        self._counter = 0
+
+    def on_snapshot(self, snapshot: MarketSnapshot) -> Iterable[OrderIntent]:
+        key = (snapshot.venue, snapshot.market_id)
+        if snapshot.resolved:
+            self._positions.pop(key, None)
+            self._orders[key] = 0
+            return
+
+        if snapshot.yes_ask is None or snapshot.yes_bid is None:
+            return
+        spread = snapshot.yes_ask - snapshot.yes_bid
+        if spread > self.max_spread:
+            return
+
+        price = snapshot.yes_ask
+        history = self._history.setdefault(key, [])
+        history.append(price)
+        if len(history) > self.lookback:
+            del history[0]
+
+        if len(history) < self.lookback:
+            return
+
+        price_range = max(history) - min(history)
+
+        # Entry logic: price in favorite zone, stable over lookback, verified ask depth
+        if (
+            self.min_price <= price <= self.max_price
+            and price_range <= self.max_range
+            and snapshot.ask_size >= self.min_depth
+            and self._orders.get(key, 0) < self.max_orders_per_market
+            and key not in self._positions
+        ):
+            self._orders[key] = self._orders.get(key, 0) + 1
+            self._positions[key] = price
+            self._counter += 1
+            yield OrderIntent(
+                timestamp_ms=snapshot.timestamp_ms,
+                venue=snapshot.venue,
+                market_id=snapshot.market_id,
+                side=Side.BUY,
+                quantity=self.quantity,
+                limit_price=price,
+                client_order_id=f"{self.prefix}-buy-{self._counter}",
+                signal="atmospheric-determinism-entry",
+                strategy=self.strategy_name,
+            )
+

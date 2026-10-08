@@ -466,7 +466,93 @@ def test_spread_harvesting_anti_courtsiding_volatility_filter():
     assert len(intents_jump) == 0  # Market maker freezes and refuses to quote!
 
 
+def test_spread_harvesting_time_decay_square_off():
+    from pm_alpha.strategies import SpreadHarvestingMarketMaker
+    mm = SpreadHarvestingMarketMaker(
+        min_spread=0.04,
+        max_spread=0.15,
+        max_holding_ticks=3,
+        stop_loss_margin=None,
+        salvage_floor=0.03,
+    )
+    # Tick 1: Buys at ask 0.50
+    b1 = list(mm.on_snapshot(MarketSnapshot(1000, "kalshi", "m1", 0.40, 0.50, 10, 10)))
+    assert len(b1) == 1
+    assert b1[0].side == Side.BUY
+
+    # Ticks 2, 3: Market moves sideways, no exit
+    list(mm.on_snapshot(MarketSnapshot(2000, "kalshi", "m1", 0.40, 0.50, 10, 10)))
+    list(mm.on_snapshot(MarketSnapshot(3000, "kalshi", "m1", 0.40, 0.50, 10, 10)))
+
+    # Tick 4: Holding ticks >= 3 (max_holding_ticks exceeded). Emits emergency liquidation SELL at bid
+    sq = list(mm.on_snapshot(MarketSnapshot(4000, "kalshi", "m1", 0.40, 0.50, 10, 10)))
+    assert len(sq) == 1
+    assert sq[0].side == Side.SELL
+    assert sq[0].signal == "mm-square-off-time"
+    assert sq[0].limit_price == 0.40
+    assert mm._inventory.get(("kalshi", "m1"), 0.0) == 0.0
 
 
+def test_spread_harvesting_toxic_stop_loss_square_off():
+    from pm_alpha.strategies import SpreadHarvestingMarketMaker
+    mm = SpreadHarvestingMarketMaker(
+        min_spread=0.04,
+        max_spread=0.15,
+        stop_loss_margin=0.06,
+        salvage_floor=0.03,
+    )
+    # Tick 1: Buys at ask 0.50 (avg_cost = 0.50)
+    list(mm.on_snapshot(MarketSnapshot(1000, "kalshi", "m1", 0.40, 0.50, 10, 10)))
+
+    # Tick 2: Bid plunges to 0.43 (0.50 - 0.43 = 0.07 >= stop_loss_margin 0.06)
+    toxic = list(mm.on_snapshot(MarketSnapshot(2000, "kalshi", "m1", 0.43, 0.55, 10, 10)))
+    assert len(toxic) == 1
+    assert toxic[0].side == Side.SELL
+    assert toxic[0].signal == "mm-toxic-flow-stop"
+    assert toxic[0].limit_price == 0.43
+    assert mm._inventory.get(("kalshi", "m1"), 0.0) == 0.0
 
 
+def test_microstructure_retail_herd_fader():
+    from pm_alpha.strategies import MicrostructureRetailHerdFader
+    fader = MicrostructureRetailHerdFader(
+        lookback_snapshots=3,
+        max_target_price=0.30,
+        min_price_runup=0.04,
+        min_depth_absorption=2.0,
+        min_microprice_discount=0.015,
+        max_spread=0.03,
+    )
+    # Ticks 1-3: baseline at ask 0.20
+    list(fader.on_snapshot(MarketSnapshot(1000, "kalshi", "m1", 0.18, 0.20, 10, 10)))
+    list(fader.on_snapshot(MarketSnapshot(2000, "kalshi", "m1", 0.18, 0.20, 10, 10)))
+    list(fader.on_snapshot(MarketSnapshot(3000, "kalshi", "m1", 0.18, 0.20, 10, 10)))
+
+    # Tick 4: retail runs price up to 0.25 (runup = +0.05). Bid 0.23, Ask 0.25.
+    # Institutional ask wall: bid_size=10, ask_size=30 (depth ratio 3.0 >= 2.0).
+    # Micro-price = (10*0.25 + 30*0.23)/40 = (2.5 + 6.9)/40 = 0.235. Micro-discount = 0.25 - 0.235 = 0.015.
+    fade = list(fader.on_snapshot(MarketSnapshot(4000, "kalshi", "m1", 0.23, 0.25, 10, 30)))
+    assert len(fade) == 1
+    assert fade[0].side == Side.SELL
+    assert fade[0].signal == "retail-herd-exhaustion-fade"
+    assert fade[0].limit_price == 0.23
+
+
+def test_atmospheric_temperature_harvester():
+    from pm_alpha.strategies import AtmosphericTemperatureHarvester
+    harvester = AtmosphericTemperatureHarvester(
+        min_price=0.88,
+        max_price=0.95,
+        lookback=3,
+        max_range=0.02,
+        min_depth=2.0,
+        max_spread=0.02,
+    )
+    # Ticks 1-3: Stable high price in favorite weather zone
+    list(harvester.on_snapshot(MarketSnapshot(1000, "kalshi", "KXTEMPCHIHS-26OCT08", 0.92, 0.93, 10, 10)))
+    list(harvester.on_snapshot(MarketSnapshot(2000, "kalshi", "KXTEMPCHIHS-26OCT08", 0.92, 0.93, 10, 10)))
+    orders = list(harvester.on_snapshot(MarketSnapshot(3000, "kalshi", "KXTEMPCHIHS-26OCT08", 0.92, 0.93, 10, 10)))
+    assert len(orders) == 1
+    assert orders[0].side == Side.BUY
+    assert orders[0].signal == "atmospheric-determinism-entry"
+    assert orders[0].limit_price == 0.93

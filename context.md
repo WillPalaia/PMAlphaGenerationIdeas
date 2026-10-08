@@ -659,6 +659,25 @@ Over multiple days of uninterrupted forward capture across 302 active Kalshi mar
 3. **`deep-oversold`**: Maintained with mandatory time-decay exit (`max_holding_ticks = 120`, `max_holding_ms = 7,200,000`) as an experimental control.
 4. **`complement-arbitrage`**: Added across all 151 markets to scan for riskless crossed/locked books and Dutch book parity opportunities.
 
+## October 8, 2026 24-Hour Forward Paper Trading Audit
 
+### Live Runtime Snapshot:
+- **Duration Evaluated:** October 7, 2026 ~03:47 UTC to October 8, 2026 ~02:02 UTC (~22.5 hours).
+- **Service Status:** Active, 0 restarts on Oracle VM, 21.6M snapshots captured, 140 active markets monitored.
+- **Sub-Portfolio Isolation:** Each strategy initialized with $100.00 cash.
 
-
+### Strategy Attribution:
+1. **`conservative-yield`**: **+$0.53 net alpha (+0.53% return)** | Equity: **$100.53**
+   - 10 fills (10 buys, 0 sells) across weather temperature markets (`KXTEMPCHIHS`, `KXTEMPMIAH`, `KXTEMPLAXHS`, `KXTEMPNYCHS`) at $0.93–$0.94.
+   - **100.0% Win Rate** (10 wins, 0 losses) at expiration settlement.
+   - Removing the stop-loss avoided false stop-outs in thin books and let bounded physical contracts converge to $1.00.
+2. **`spread-harvesting`**: **-$7.62 net alpha (-7.62% return)** | Equity: **$92.38**
+   - 146 fills (107 buys, 39 sells) across 94 markets.
+   - Active intraday trading generated **+$2.81** across 39 closed spread-crossing round trips.
+   - Expiration settlement lost **-$9.60** across 67 settled markets (21 wins, 46 losses; 31.3% win rate) due to adverse selection on unsold inventory.
+3. **`deep-oversold`**: **-$4.28 net alpha (-4.28% return)** | Equity: **$95.72**
+   - 15 fills (14 buys, 1 sell).
+   - **0.0% Win Rate** at expiration settlement (0 wins, 12 losses; -$3.87 settlement P&L).
+   - Sharp sell-offs (Z <= -2.5) in sports and commodity markets represent permanent fundamental news shocks rather than mean-reverting liquidity drops.
+4. **`complement-arbitrage`**: **$0.00 (0 fills)** | Equity: **$100.00**
+   - Zero locked/crossed books or Dutch book taker opportunities detected across 140 active markets.

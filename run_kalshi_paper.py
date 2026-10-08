@@ -28,6 +28,8 @@ from pm_alpha.strategies import (
     TimeDecayYieldStrategy,
     VolumeWeightedMeanReversionStrategy,
     VwapPullbackStrategy,
+    MicrostructureRetailHerdFader,
+    AtmosphericTemperatureHarvester,
 )
 
 
@@ -98,11 +100,11 @@ async def main() -> None:
     next_discovery = asyncio.get_running_loop().time() + args.discovery_interval
 
     strategy_definitions = {
-        # 1. Spread-Capturing Market Maker (Anti-Courtsiding, Low-Volatility Only)
+        # 1. Spread-Capturing Market Maker with Pre-Settlement & Adverse Flow Square-Off
         # Quoting ONLY in slow, non-volatile sectors (Weather & Macro/Finance; NO live sports).
-        # Equipped with price-jump detection (max_price_jump=0.01) and rolling-range bounds (max_rolling_range=0.02)
-        # to pull quotes in advance of volatility and prevent latency/courtsiding exploitation.
-        # Strict 1-contract max inventory per market.
+        # Equipped with price-jump detection (max_price_jump=0.01) and rolling-range bounds (max_rolling_range=0.02).
+        # Crucially includes max_holding_ticks=60, max_holding_ms=3600000, and stop_loss_margin=0.06 to
+        # liquidate stale/toxic inventory before binary expiration ($0.00 wipeout protection).
         "spread-harvesting": SpreadHarvestingMarketMaker(
             min_spread=0.04,
             max_spread=0.10,
@@ -116,43 +118,46 @@ async def main() -> None:
             max_price_jump=0.01,
             max_rolling_range=0.02,
             volatility_lookback=15,
+            max_holding_ticks=60,
+            max_holding_ms=3600000,
+            stop_loss_margin=0.06,
+            salvage_floor=0.03,
             prefix="mm-harvest",
             strategy_name="spread-harvesting",
         ),
 
-        # 2. Pure Hold-to-Maturity Favorite Harvester (Zero Exits, Strict 1-Cent Spread Taker Hurdle)
+        # 2. Pure Hold-to-Maturity Favorite Harvester (Weather & Macro Determinism)
         # NEVER sells early: zero stop-loss and zero take-profit. Holds 100% of contracts strictly to maturity.
-        # Taker entry ONLY when spread is exactly 1 cent (max_spread=0.01) to eliminate spread friction.
-        "conservative-yield": StableHighProbabilityStrategy(
-            lower_price=0.85,
-            upper_price=0.94,
+        # Targets 0.88-0.95 high-certainty contracts with max_spread=0.025 in bounded physical sectors.
+        "conservative-yield": AtmosphericTemperatureHarvester(
+            min_price=0.88,
+            max_price=0.95,
             lookback=6,
             max_range=0.03,
             min_depth=3.0,
-            take_profit_price=None,
-            stop_loss_price=None,
-            max_spread=0.01,
+            max_spread=0.025,
+            quantity=1.0,
             prefix="conservative-yield",
             strategy_name="conservative-yield",
         ),
 
-        # 3. Extreme Statistical Reversion (Strict 1-Cent Spread Taker Hurdle with Time Decay)
-        # Taker entry ONLY when spread is exactly 1 cent (max_spread=0.01) on extreme dislocations (Z <= -2.5).
-        # Enforces a mandatory 120-tick / 2-hour holding bound so un-reverted positions are never held into binary expiration.
-        "deep-oversold": BollingerReversionStrategy(
-            lookback=15,
-            entry_z=-2.5,
-            exit_z=-0.5,
-            prefix="deep-oversold",
-            strategy_name="deep-oversold",
-            min_price=0.20,
-            max_price=0.75,
-            min_std=0.02,
-            min_stop_loss_bid=0.15,
-            max_spread=0.01,
-            min_profit_target=0.02,
-            max_holding_ticks=120,
-            max_holding_ms=7200000,
+        # 3. Microstructure Retail Herd Fader (Contrarian Fade of Retail Speculative Frenzy)
+        # Replaces ruined deep-oversold. Fades retail mob rushes on lottery longshots (<= 0.35)
+        # when institutional ask walls absorb the move and micro-price pulls toward bid.
+        # Strictly limited to 40-tick / intra-day horizon with take-profit=0.04 and stop-loss=0.05.
+        "microstructure-herd-fader": MicrostructureRetailHerdFader(
+            lookback_snapshots=15,
+            max_target_price=0.35,
+            min_price_runup=0.04,
+            min_depth_absorption=2.0,
+            min_microprice_discount=0.015,
+            max_spread=0.035,
+            take_profit=0.04,
+            stop_loss=0.05,
+            max_holding_ticks=40,
+            quantity=1.0,
+            prefix="herd-fade",
+            strategy_name="microstructure-herd-fader",
         ),
 
         # 4. Parity & Dutch Book Arbitrage (Risk-Free Structural Mispricing across All Markets)
@@ -167,7 +172,7 @@ async def main() -> None:
         # Exclude sports from market making completely! Only quote slow, non-courtsided markets
         "spread-harvesting": {"macro_finance", "weather"},
         "conservative-yield": {"macro_finance", "weather"},
-        "deep-oversold": {"macro_finance", "sports"},
+        "microstructure-herd-fader": {"macro_finance", "sports"},
         # Arbitrage scans across ALL markets without restriction
         "complement-arbitrage": "all",
     }
