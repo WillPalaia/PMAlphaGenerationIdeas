@@ -22,13 +22,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--config",
-        default="/opt/pm-alpha/strategy_config.json",
+        default="/var/lib/pm-alpha/strategy_config.json",
         help="Path to strategy config JSON",
     )
     parser.add_argument(
         "--reports-dir",
         default="/var/lib/pm-alpha/reports",
         help="Directory to save daily markdown reports",
+    )
+    parser.add_argument(
+        "--gemini-api-key",
+        default=None,
+        help="Google AI Studio Gemini API key for automated narrative analysis (optional)",
     )
     parser.add_argument(
         "--restart-service",
@@ -46,6 +51,7 @@ def main() -> None:
         db_path=args.db,
         config_path=args.config,
         reports_dir=args.reports_dir,
+        gemini_api_key=args.gemini_api_key,
     )
 
     print(f"\n[1/3] Performance audit complete for {result['date']}.")

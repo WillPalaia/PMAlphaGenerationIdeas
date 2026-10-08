@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import sqlite3
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -194,11 +197,86 @@ def compute_auto_tuning(
     return new_config, adjustments
 
 
+def fetch_gemini_commentary(
+    metrics: Dict[str, Any],
+    adjustments: list[str],
+    api_key: Optional[str] = None,
+) -> Optional[str]:
+    """Fetch qualitative AI executive commentary using Gemini API (Google AI Studio Free Tier)."""
+    key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not key:
+        for p in [Path("/var/lib/pm-alpha/gemini_api_key.txt"), Path("gemini_api_key.txt")]:
+            if p.exists():
+                try:
+                    key = p.read_text(encoding="utf-8").strip()
+                    break
+                except Exception:
+                    pass
+    if not key:
+        return None
+
+    # Construct quantitative summary facts
+    summary_data = {
+        strat: {
+            "equity": round(m.get("latest_equity", 100.0), 2),
+            "net_pnl": round(m.get("net_pnl", 0.0), 2),
+            "return_pct": round(m.get("return_pct", 0.0), 2),
+            "settled_wins": m.get("settled_wins", 0),
+            "settled_losses": m.get("settled_losses", 0),
+            "settled_win_rate": round(m.get("settled_win_rate", 0.0), 1),
+            "active_pnl": round(m.get("active_pnl", 0.0), 2),
+            "open_positions": m.get("open_positions", 0),
+            "fees": round(m.get("fees", 0.0), 4),
+        }
+        for strat, m in metrics.items()
+    }
+
+    prompt = (
+        "You are a Senior Quantitative Hedge Fund Portfolio Manager auditing daily prediction market trading on Kalshi.\n"
+        "Here are today's performance metrics and statistical auto-tuning actions:\n\n"
+        f"Portfolio Metrics:\n{json.dumps(summary_data, indent=2)}\n\n"
+        f"Auto-Tuning Actions Taken:\n{json.dumps(adjustments, indent=2)}\n\n"
+        "Please provide a concise (3-4 short paragraphs) executive review in clean Markdown:\n"
+        "1. Performance Attribution: What drove gains or losses (e.g., physical weather determinism vs. adverse selection on unsold inventory into expiration)?\n"
+        "2. Market Microstructure Observations: Detail how spread friction, retail order flow, or binary expiration decay manifested.\n"
+        "3. High-Conviction Tactical Recommendations: What parameter or execution adjustments should be prioritized next?"
+    )
+
+    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash"]
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+        payload = json.dumps({
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024}
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        return parts[0].get("text", "")
+        except Exception:
+            continue
+
+    return "> *Note: Gemini API key detected, but the request could not be completed at this time.*"
+
+
 def generate_markdown_report(
     date_str: str,
     metrics: Dict[str, Any],
     adjustments: list[str],
     config: Dict[str, Any],
+    gemini_commentary: Optional[str] = None,
 ) -> str:
     """Generate a clean daily performance audit and auto-tuning report."""
     lines = [
@@ -242,6 +320,21 @@ def generate_markdown_report(
         "",
     ])
 
+    if gemini_commentary:
+        lines.extend([
+            "## 4. Gemini AI Executive Commentary & Qualitative Insights",
+            "",
+            gemini_commentary.strip(),
+            "",
+        ])
+    else:
+        lines.extend([
+            "## 4. Gemini AI Executive Commentary",
+            "",
+            "> *AI narrative commentary is waiting for Google AI Studio API key. (Place your free API key in `/var/lib/pm-alpha/gemini_api_key.txt` or set `GEMINI_API_KEY` to enable daily AI market reviews).* ",
+            "",
+        ])
+
     return "\n".join(lines)
 
 
@@ -249,6 +342,7 @@ def run_optimization_cycle(
     db_path: str = "/var/lib/pm-alpha/market_data.sqlite",
     config_path: str = "/opt/pm-alpha/strategy_config.json",
     reports_dir: str = "/var/lib/pm-alpha/reports",
+    gemini_api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute complete end-to-end nightly optimization and reporting cycle."""
     conn = sqlite3.connect(db_path)
@@ -273,13 +367,16 @@ def run_optimization_cycle(
     with open(cfg_file, "w", encoding="utf-8") as f:
         json.dump(new_cfg, f, indent=2)
 
+    # Fetch Gemini commentary if API key is provided / discovered
+    gemini_commentary = fetch_gemini_commentary(metrics, adjustments, api_key=gemini_api_key)
+
     # Generate and save daily report
     date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     rep_dir = Path(reports_dir)
     rep_dir.mkdir(parents=True, exist_ok=True)
     report_file = rep_dir / f"daily_report_{date_str}.md"
 
-    report_md = generate_markdown_report(date_str, metrics, adjustments, new_cfg)
+    report_md = generate_markdown_report(date_str, metrics, adjustments, new_cfg, gemini_commentary=gemini_commentary)
     with open(report_file, "w", encoding="utf-8") as f:
         f.write(report_md)
 

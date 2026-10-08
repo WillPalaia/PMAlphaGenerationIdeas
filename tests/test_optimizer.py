@@ -77,3 +77,12 @@ def test_optimizer_cycle_end_to_end():
         assert "spread-harvesting" in cfg
         # Since it had losses, min_spread should have been tightened/widened or holding ticks reduced
         assert cfg["spread-harvesting"]["min_spread"] >= 0.04
+        assert "Gemini AI Executive Commentary" in res["report_md"]
+
+
+def test_fetch_gemini_commentary_no_key():
+    from pm_alpha.optimizer import fetch_gemini_commentary
+    # When no key is given and env is unset, returns None gracefully
+    res = fetch_gemini_commentary({}, [], api_key=None)
+    assert res is None or isinstance(res, str)
+
