@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import time
+from pathlib import Path
 
 from pm_alpha.kalshi_source import KalshiPublicSource
 from pm_alpha.discovery import KalshiMarketDiscovery
@@ -99,28 +100,49 @@ async def main() -> None:
     source = KalshiPublicSource(active_watchlist or ["KXNFLRSHYDS-26SEP24ATLGB-ATLBROBINSON7-175"], concurrency=8)
     next_discovery = asyncio.get_running_loop().time() + args.discovery_interval
 
+    # Load dynamic auto-tuned strategy configuration if present
+    config_file = Path("/var/lib/pm-alpha/strategy_config.json")
+    if not config_file.exists():
+        config_file = Path("/opt/pm-alpha/strategy_config.json")
+    if not config_file.exists():
+        config_file = Path("strategy_config.json")
+    dyn_cfg: dict = {}
+    if config_file.exists():
+        try:
+            import json
+            with open(config_file, "r", encoding="utf-8") as f:
+                dyn_cfg = json.load(f)
+            log.info("Loaded dynamic strategy config from %s", config_file)
+        except Exception as e:
+            log.warning("Could not read dynamic config: %s", e)
+
+    sh_cfg = dyn_cfg.get("spread-harvesting", {})
+    cy_cfg = dyn_cfg.get("conservative-yield", {})
+    mh_cfg = dyn_cfg.get("microstructure-herd-fader", {})
+    ca_cfg = dyn_cfg.get("complement-arbitrage", {})
+
     strategy_definitions = {
         # 1. Spread-Capturing Market Maker with Pre-Settlement & Adverse Flow Square-Off
         # Quoting ONLY in slow, non-volatile sectors (Weather & Macro/Finance; NO live sports).
         # Equipped with price-jump detection (max_price_jump=0.01) and rolling-range bounds (max_rolling_range=0.02).
-        # Crucially includes max_holding_ticks=60, max_holding_ms=3600000, and stop_loss_margin=0.06 to
+        # Crucially includes max_holding_ticks, max_holding_ms, and stop_loss_margin to
         # liquidate stale/toxic inventory before binary expiration ($0.00 wipeout protection).
         "spread-harvesting": SpreadHarvestingMarketMaker(
-            min_spread=0.04,
-            max_spread=0.10,
-            inventory_skew=0.02,
-            max_inventory=1.0,
+            min_spread=sh_cfg.get("min_spread", 0.04),
+            max_spread=sh_cfg.get("max_spread", 0.10),
+            inventory_skew=sh_cfg.get("inventory_skew", 0.02),
+            max_inventory=sh_cfg.get("max_inventory", 1.0),
             quantity=1.0,
-            aggressiveness=0.40,
-            min_profit=0.02,
-            min_price=0.20,
-            max_price=0.80,
+            aggressiveness=sh_cfg.get("aggressiveness", 0.40),
+            min_profit=sh_cfg.get("min_profit", 0.02),
+            min_price=sh_cfg.get("min_price", 0.20),
+            max_price=sh_cfg.get("max_price", 0.80),
             max_price_jump=0.01,
             max_rolling_range=0.02,
             volatility_lookback=15,
-            max_holding_ticks=60,
-            max_holding_ms=3600000,
-            stop_loss_margin=0.06,
+            max_holding_ticks=sh_cfg.get("max_holding_ticks", 60),
+            max_holding_ms=sh_cfg.get("max_holding_ms", 3600000),
+            stop_loss_margin=sh_cfg.get("stop_loss_margin", 0.06),
             salvage_floor=0.03,
             prefix="mm-harvest",
             strategy_name="spread-harvesting",
@@ -128,14 +150,14 @@ async def main() -> None:
 
         # 2. Pure Hold-to-Maturity Favorite Harvester (Weather & Macro Determinism)
         # NEVER sells early: zero stop-loss and zero take-profit. Holds 100% of contracts strictly to maturity.
-        # Targets 0.88-0.95 high-certainty contracts with max_spread=0.025 in bounded physical sectors.
+        # Targets high-certainty contracts with tight spread in bounded physical sectors.
         "conservative-yield": AtmosphericTemperatureHarvester(
-            min_price=0.88,
-            max_price=0.95,
-            lookback=6,
-            max_range=0.03,
+            min_price=cy_cfg.get("min_price", 0.88),
+            max_price=cy_cfg.get("max_price", 0.95),
+            lookback=cy_cfg.get("lookback", 6),
+            max_range=cy_cfg.get("max_range", 0.03),
             min_depth=3.0,
-            max_spread=0.025,
+            max_spread=cy_cfg.get("max_spread", 0.025),
             quantity=1.0,
             prefix="conservative-yield",
             strategy_name="conservative-yield",
@@ -144,17 +166,17 @@ async def main() -> None:
         # 3. Microstructure Retail Herd Fader (Contrarian Fade of Retail Speculative Frenzy)
         # Replaces ruined deep-oversold. Fades retail mob rushes on lottery longshots (<= 0.35)
         # when institutional ask walls absorb the move and micro-price pulls toward bid.
-        # Strictly limited to 40-tick / intra-day horizon with take-profit=0.04 and stop-loss=0.05.
+        # Strictly limited to intra-day horizon with take-profit and stop-loss.
         "microstructure-herd-fader": MicrostructureRetailHerdFader(
-            lookback_snapshots=15,
-            max_target_price=0.35,
-            min_price_runup=0.04,
-            min_depth_absorption=2.0,
+            lookback_snapshots=mh_cfg.get("lookback_snapshots", 15),
+            max_target_price=mh_cfg.get("max_target_price", 0.35),
+            min_price_runup=mh_cfg.get("min_price_runup", 0.04),
+            min_depth_absorption=mh_cfg.get("min_depth_absorption", 2.0),
             min_microprice_discount=0.015,
-            max_spread=0.035,
-            take_profit=0.04,
-            stop_loss=0.05,
-            max_holding_ticks=40,
+            max_spread=mh_cfg.get("max_spread", 0.035),
+            take_profit=mh_cfg.get("take_profit", 0.04),
+            stop_loss=mh_cfg.get("stop_loss", 0.05),
+            max_holding_ticks=mh_cfg.get("max_holding_ticks", 40),
             quantity=1.0,
             prefix="herd-fade",
             strategy_name="microstructure-herd-fader",
@@ -163,7 +185,7 @@ async def main() -> None:
         # 4. Parity & Dutch Book Arbitrage (Risk-Free Structural Mispricing across All Markets)
         # Scans EVERY market discovered (all categories, zero basket limits) for locked/crossed books.
         "complement-arbitrage": ComplementArbitrageStrategy(
-            min_edge=0.0,
+            min_edge=ca_cfg.get("min_edge", 0.0),
             quantity=1.0,
         ),
     }

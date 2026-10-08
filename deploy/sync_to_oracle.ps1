@@ -61,8 +61,12 @@ sudo tar -xzf /tmp/pm_alpha_deploy.tar.gz -C /opt/pm-alpha
 rm -f /tmp/pm_alpha_deploy.tar.gz
 sudo chown -R pmalpha:pmalpha /opt/pm-alpha
 sudo cp /opt/pm-alpha/deploy/pm-alpha-paper.service /etc/systemd/system/pm-alpha-paper.service
+sudo cp /opt/pm-alpha/deploy/pm-alpha-optimizer.service /etc/systemd/system/pm-alpha-optimizer.service
+sudo cp /opt/pm-alpha/deploy/pm-alpha-optimizer.timer /etc/systemd/system/pm-alpha-optimizer.timer
 sudo systemctl daemon-reload
+sudo systemctl enable --now pm-alpha-optimizer.timer
 sudo /opt/pm-alpha/.venv/bin/pip install -e /opt/pm-alpha --no-deps
+sudo /opt/pm-alpha/.venv/bin/pip install pytest -q
 sudo systemctl restart pm-alpha-paper
 for i in $(seq 1 10); do
     if sudo systemctl is-active --quiet pm-alpha-paper; then
@@ -71,6 +75,7 @@ for i in $(seq 1 10); do
     sleep 1
 done
 sudo systemctl is-active pm-alpha-paper
+sudo systemctl is-active pm-alpha-optimizer.timer
 '@
 
 $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($remoteCommands))

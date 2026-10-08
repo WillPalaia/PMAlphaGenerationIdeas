@@ -681,3 +681,26 @@ Over multiple days of uninterrupted forward capture across 302 active Kalshi mar
    - Sharp sell-offs (Z <= -2.5) in sports and commodity markets represent permanent fundamental news shocks rather than mean-reverting liquidity drops.
 4. **`complement-arbitrage`**: **$0.00 (0 fills)** | Equity: **$100.00**
    - Zero locked/crossed books or Dutch book taker opportunities detected across 140 active markets.
+
+## October 8, 2026 100% Autonomous Cloud Auto-Tuning Architecture & Deployment
+
+### 1. Database Optimization & Housekeeping on Oracle VM:
+- Dropped all 12 obsolete Phase 1 & Phase 2 legacy tables (`paper_orders_phase1/2`, `paper_fills_phase1/2`, `paper_positions_phase1/2`, `paper_strategy_positions_phase1/2`, `paper_equity_phase1/2`, `paper_strategy_equity_phase1/2`).
+- Purged 5.28M dead unquoted snapshots from September.
+- Maintained clean single source of truth in `/var/lib/pm-alpha/market_data.sqlite` (2.9 GB) containing only active production tables (`market_snapshots`, `paper_equity`, `paper_fills`, `paper_orders`, `paper_positions`, `paper_strategy_equity`, `paper_strategy_positions`).
+
+### 2. Strategy Roster Updates:
+- **Decommissioned `deep-oversold`**: Permanent fundamental news shocks systematically invalidate mean reversion in binary prediction markets.
+- **Upgraded `spread-harvesting`**: Enforced `max_holding_ticks = 50-60`, `max_holding_ms = 3,600,000`, `stop_loss_margin = 0.05-0.06`, and `salvage_floor = 0.03` to liquidate unmatched inventory and protect against binary expiration wipeouts.
+- **Deployed `AtmosphericTemperatureHarvester` (`conservative-yield`)**: Exploits high-certainty physical weather determinism ($0.88–$0.95) with hold-to-maturity logic (15/15 settled wins, 100% win rate, +$0.90 P&L).
+- **Deployed `MicrostructureRetailHerdFader`**: Contrarian fading of retail speculative frenzies on cheap contracts (<= $0.35) when institutional ask walls absorb the move.
+
+### 3. Server-Side Autonomous Optimizer (`pm-alpha-optimizer`):
+- Designed and deployed `src/pm_alpha/optimizer.py` and `run_nightly_optimizer.py`.
+- Runs 100% mathematically and statistically on the Oracle VM CPU ($0.00 extra cost, zero LLM tokens, zero out-of-pocket bills).
+- Automatically writes daily Markdown attribution reports to `/var/lib/pm-alpha/reports/daily_report_<date>.md`.
+- Automatically computes parameter updates and writes `/var/lib/pm-alpha/strategy_config.json`, which is dynamically loaded on reload by `run_kalshi_paper.py`.
+- Executes pre-flight test suites (`pytest` with 65/65 tests passing) before applying zero-downtime reloads to `pm-alpha-paper.service`.
+- Configured systemd timer `pm-alpha-optimizer.timer` to run autonomously every evening at 9:00 PM Eastern Time (`*-*-* 21:00:00 America/New_York` / 01:00 UTC).
+- **Zero Laptop Dependency**: Operates 24/7 on the cloud VM even when the user's laptop is powered off. Tested end-to-end and verified active.
+

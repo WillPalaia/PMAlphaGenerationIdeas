@@ -1,0 +1,16 @@
+[Unit]
+Description=Nightly autonomous quantitative strategy optimizer and performance auditor
+After=network.target pm-alpha-paper.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/pm-alpha
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/pm-alpha/.venv/bin/python /opt/pm-alpha/run_nightly_optimizer.py --db /var/lib/pm-alpha/market_data.sqlite --config /var/lib/pm-alpha/strategy_config.json --reports-dir /var/lib/pm-alpha/reports --restart-service
+ExecStartPost=/bin/chown -R pmalpha:pmalpha /var/lib/pm-alpha
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
