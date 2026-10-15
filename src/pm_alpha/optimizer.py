@@ -242,7 +242,7 @@ def fetch_gemini_commentary(
         "3. High-Conviction Tactical Recommendations: What parameter or execution adjustments should be prioritized next?"
     )
 
-    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash"]
+    models_to_try = ["gemini-2.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash"]
     for model_name in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
         payload = json.dumps({

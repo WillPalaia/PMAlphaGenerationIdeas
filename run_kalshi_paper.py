@@ -122,31 +122,6 @@ async def main() -> None:
     ca_cfg = dyn_cfg.get("complement-arbitrage", {})
 
     strategy_definitions = {
-        # 1. Spread-Capturing Market Maker with Pre-Settlement & Adverse Flow Square-Off
-        # Quoting ONLY in slow, non-volatile sectors (Weather & Macro/Finance; NO live sports).
-        # Equipped with price-jump detection (max_price_jump=0.01) and rolling-range bounds (max_rolling_range=0.02).
-        # Crucially includes max_holding_ticks, max_holding_ms, and stop_loss_margin to
-        # liquidate stale/toxic inventory before binary expiration ($0.00 wipeout protection).
-        "spread-harvesting": SpreadHarvestingMarketMaker(
-            min_spread=sh_cfg.get("min_spread", 0.04),
-            max_spread=sh_cfg.get("max_spread", 0.10),
-            inventory_skew=sh_cfg.get("inventory_skew", 0.02),
-            max_inventory=sh_cfg.get("max_inventory", 1.0),
-            quantity=1.0,
-            aggressiveness=sh_cfg.get("aggressiveness", 0.40),
-            min_profit=sh_cfg.get("min_profit", 0.02),
-            min_price=sh_cfg.get("min_price", 0.20),
-            max_price=sh_cfg.get("max_price", 0.80),
-            max_price_jump=0.01,
-            max_rolling_range=0.02,
-            volatility_lookback=15,
-            max_holding_ticks=sh_cfg.get("max_holding_ticks", 60),
-            max_holding_ms=sh_cfg.get("max_holding_ms", 3600000),
-            stop_loss_margin=sh_cfg.get("stop_loss_margin", 0.06),
-            salvage_floor=0.03,
-            prefix="mm-harvest",
-            strategy_name="spread-harvesting",
-        ),
 
         # 2. Pure Hold-to-Maturity Favorite Harvester (Weather & Macro Determinism)
         # NEVER sells early: zero stop-loss and zero take-profit. Holds 100% of contracts strictly to maturity.
@@ -163,26 +138,7 @@ async def main() -> None:
             strategy_name="conservative-yield",
         ),
 
-        # 3. Microstructure Retail Herd Fader (Contrarian Fade of Retail Speculative Frenzy)
-        # Replaces ruined deep-oversold. Fades retail mob rushes on lottery longshots (<= 0.35)
-        # when institutional ask walls absorb the move and micro-price pulls toward bid.
-        # Strictly limited to intra-day horizon with take-profit and stop-loss.
-        "microstructure-herd-fader": MicrostructureRetailHerdFader(
-            lookback_snapshots=mh_cfg.get("lookback_snapshots", 15),
-            max_target_price=mh_cfg.get("max_target_price", 0.35),
-            min_price_runup=mh_cfg.get("min_price_runup", 0.04),
-            min_depth_absorption=mh_cfg.get("min_depth_absorption", 2.0),
-            min_microprice_discount=0.015,
-            max_spread=mh_cfg.get("max_spread", 0.035),
-            take_profit=mh_cfg.get("take_profit", 0.04),
-            stop_loss=mh_cfg.get("stop_loss", 0.05),
-            max_holding_ticks=mh_cfg.get("max_holding_ticks", 40),
-            quantity=1.0,
-            prefix="herd-fade",
-            strategy_name="microstructure-herd-fader",
-        ),
-
-        # 4. Parity & Dutch Book Arbitrage (Risk-Free Structural Mispricing across All Markets)
+        # 2. Parity & Dutch Book Arbitrage (Risk-Free Structural Mispricing across All Markets)
         # Scans EVERY market discovered (all categories, zero basket limits) for locked/crossed books.
         "complement-arbitrage": ComplementArbitrageStrategy(
             min_edge=ca_cfg.get("min_edge", 0.0),
@@ -191,10 +147,8 @@ async def main() -> None:
     }
 
     strategy_baskets = {
-        # Exclude sports from market making completely! Only quote slow, non-courtsided markets
-        "spread-harvesting": {"macro_finance", "weather"},
+        # Restrict conservative-yield strictly to bounded deterministic sectors
         "conservative-yield": {"macro_finance", "weather"},
-        "microstructure-herd-fader": {"macro_finance", "sports"},
         # Arbitrage scans across ALL markets without restriction
         "complement-arbitrage": "all",
     }

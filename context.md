@@ -704,3 +704,35 @@ Over multiple days of uninterrupted forward capture across 302 active Kalshi mar
 - Configured systemd timer `pm-alpha-optimizer.timer` to run autonomously every evening at 9:00 PM Eastern Time (`*-*-* 21:00:00 America/New_York` / 01:00 UTC).
 - **Zero Laptop Dependency**: Operates 24/7 on the cloud VM even when the user's laptop is powered off. Tested end-to-end and verified active.
 
+## October 15, 2026 7-Day Multi-Day Forward Audit & Statistical Significance Proof
+
+### 1. 7-Day Cloud Operational Telemetry:
+- **Total Market Snapshots:** 27,741,748 across 102,349 unique contracts.
+- **Service Uptime:** 100% continuous runtime on Oracle VM (`pm-alpha-paper.service` and `pm-alpha-optimizer.timer`), 0 restarts, 0 crashes.
+- **Nightly Optimizer:** Fired autonomously 8 consecutive evenings at 9:00 PM Eastern / 01:00 UTC, generated 8 daily markdown reports in `/var/lib/pm-alpha/reports/`.
+
+### 2. Deep Statistical Significance Analysis of `conservative-yield`:
+- **Sample Size (N):** 79 live forward settled contracts.
+- **Outcomes:** 77 Wins, 2 Losses (**97.47% Win Rate**).
+- **Average Entry Price:** $0.9210 (Market-Implied Probability: 92.10%).
+- **Average Payoff:** +$0.0794 per win vs -$0.9350 per loss (Payoff ratio: 1 : 11.8).
+- **Asymmetric Hurdle:** Breakeven required win rate is 92.10% gross, 93.02% post-fee. Actual win rate of 97.47% represents 38.5 wins per loss (3.2x the required hurdle).
+- **Hypothesis Testing:**
+  * Exact One-Sided Binomial Test vs Market Implied Probability (H0: p <= 0.9210): **p = 0.0457 (Statistically Significant at alpha = 0.05)**.
+  * 95% Wilson Score Confidence Interval for True Win Rate: **[91.2%, 99.3%]**.
+  * Expected Value per Trade: **+$0.0537** per contract.
+  * Half-Kelly Recommended Position Sizing: **34.0%** of allocated strategy bankroll.
+- **Category Breakdown:**
+  * Los Angeles Temp High (`KXTEMPLAXHS`): 17/17 (100.0% win rate, +$1.32 PnL)
+  * Chicago Temp High (`KXTEMPCHIHS`): 9/9 (100.0% win rate, +$0.67 PnL)
+  * Financial Yield (`KXFINYLTOTAL`): 2/2 (100.0% win rate, +$0.10 PnL)
+  * Seattle Rainfall (`KXRAIN`): 1/1 (100.0% win rate, +$0.12 PnL)
+  * Miami Temp High (`KXTEMPMIAH`): 32/33 (97.0% win rate, +$1.67 PnL)
+  * New York Temp High (`KXTEMPNYCHS`): 16/17 (94.1% win rate, +$0.36 PnL)
+
+### 3. Decommissioning & Strategy Pruning:
+- **`spread-harvesting` Decommissioned:** Dropped from $100.00 to $0.08 (-99.92%) due to toxic order flow / adverse selection on volatile silver/sports contracts and heavy fee churn ($10.22 in fees).
+- **`microstructure-herd-fader` Decommissioned:** Ended at $93.44 (-6.56%, 11.5% win rate) as retail spikes reflected genuine breaking news rather than mean-reverting irrational noise.
+- **`complement-arbitrage` Maintained:** Kept active across all markets as a zero-risk passive scanner.
+- **Quota Rebalancing in `discovery.py`:** Weather allocated 45%, macro/finance 35% (80% total to deterministic sectors) to maximize feed density for `conservative-yield`.
+

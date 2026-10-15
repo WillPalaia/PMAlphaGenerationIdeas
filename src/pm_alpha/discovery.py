@@ -45,6 +45,7 @@ def classify_market(ticker: str, title: str = "") -> str:
     # 4. Esports
     if any(prefix.startswith(x) for x in [
         "KXCS2", "KXDOTA", "KXVALORANT", "KXLOL", "KXOVERWATCH", "KXROCKETLEAGUE",
+        "KXESOCCER", "KXEBASKETBALL",
     ]):
         return "esports"
 
@@ -200,12 +201,12 @@ class KalshiMarketDiscovery:
 
         # Allocate category quotas dynamically based on requested limit
         quota_weights = {
-            "macro_finance": 0.30,
-            "sports": 0.35,
-            "weather": 0.18,
-            "esports": 0.10,
-            "politics": 0.04,
-            "other": 0.03,
+            "weather": 0.45,
+            "macro_finance": 0.35,
+            "sports": 0.10,
+            "esports": 0.05,
+            "politics": 0.03,
+            "other": 0.02,
         }
 
         selected: list[DiscoveredMarket] = []
