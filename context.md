@@ -735,4 +735,5 @@ Over multiple days of uninterrupted forward capture across 302 active Kalshi mar
 - **`microstructure-herd-fader` Decommissioned:** Ended at $93.44 (-6.56%, 11.5% win rate) as retail spikes reflected genuine breaking news rather than mean-reverting irrational noise.
 - **`complement-arbitrage` Maintained:** Kept active across all markets as a zero-risk passive scanner.
 - **Quota Rebalancing in `discovery.py`:** Weather allocated 45%, macro/finance 35% (80% total to deterministic sectors) to maximize feed density for `conservative-yield`.
+- **Optimization Hardening in `optimizer.py`:** Disabled Gemini LLM API calls and eliminated reactive daily hyperparameter tuning. Strategy parameters are frozen to empirically validated bounds, and nightly reports now run purely on deterministic local mathematical telemetry.
 
