@@ -31,6 +31,7 @@ from pm_alpha.strategies import (
     VwapPullbackStrategy,
     MicrostructureRetailHerdFader,
     AtmosphericTemperatureHarvester,
+    EventParityArbitrageStrategy,
 )
 from pm_alpha.weather_oracle import WeatherOracle
 
@@ -121,11 +122,12 @@ async def main() -> None:
     cy_cfg = dyn_cfg.get("conservative-yield", {})
     mh_cfg = dyn_cfg.get("microstructure-herd-fader", {})
     ca_cfg = dyn_cfg.get("complement-arbitrage", {})
+    epa_cfg = dyn_cfg.get("event-parity-arbitrage", ca_cfg)
 
     weather_oracle = WeatherOracle(cache_ttl_seconds=120.0)
 
     strategy_definitions = {
-        # 1. Pure Hold-to-Maturity Favorite Harvester with Live NWS Oracle Validation
+        # 1. Pure Hold-to-Maturity Favorite Harvester with Live NWS Oracle Validation & Dynamic Sizing
         # Validated with NOAA ASOS ground-truth station observations to reject knife-edge margins.
         "conservative-yield": AtmosphericTemperatureHarvester(
             min_price=cy_cfg.get("min_price", 0.88),
@@ -138,21 +140,29 @@ async def main() -> None:
             prefix="conservative-yield",
             strategy_name="conservative-yield",
             oracle=weather_oracle,
+            allocated_cash=portfolio.strategy_states.get("conservative-yield").cash if portfolio.strategy_states.get("conservative-yield") else portfolio.cash,
+            dynamic_sizing=True,
+            market_metadata=discovered_markets_meta,
         ),
 
-        # 2. Parity & Dutch Book Arbitrage (Risk-Free Structural Mispricing across All Markets)
-        # Scans EVERY market discovered (all categories, zero basket limits) for locked/crossed books.
-        "complement-arbitrage": ComplementArbitrageStrategy(
-            min_edge=ca_cfg.get("min_edge", 0.0),
+        # 2. Event-Level Dutch Book Parity Arbitrage across All Markets (including Esports & LoL Worlds)
+        # Scans EVERY market discovered (all categories, zero basket limits) for Dutch book parity anomalies.
+        "event-parity-arbitrage": EventParityArbitrageStrategy(
+            min_edge=epa_cfg.get("min_edge", 0.0),
+            fee_rate=args.fee_rate,
             quantity=1.0,
+            min_order_size=1.0,
+            strategy_name="event-parity-arbitrage",
+            market_metadata=discovered_markets_meta,
+            allocated_cash=portfolio.strategy_states.get("event-parity-arbitrage").cash if portfolio.strategy_states.get("event-parity-arbitrage") else portfolio.cash,
         ),
     }
 
     strategy_baskets = {
         # Restrict conservative-yield strictly to bounded deterministic sectors
         "conservative-yield": {"macro_finance", "weather"},
-        # Arbitrage scans across ALL markets without restriction
-        "complement-arbitrage": "all",
+        # Event Parity Arbitrage scans across ALL markets without restriction including esports
+        "event-parity-arbitrage": "all",
     }
 
     strategy = MultiStrategy(
@@ -210,6 +220,22 @@ async def main() -> None:
         discovered_tickers = [market.ticker for market in discovered]
         new_meta = {m.ticker: m for m in discovered}
         strategy.set_market_metadata(new_meta)
+
+        cy_strat = strategy_definitions.get("conservative-yield")
+        if cy_strat and hasattr(cy_strat, "set_allocated_cash"):
+            cy_cash = portfolio.strategy_states.get("conservative-yield")
+            if cy_cash:
+                cy_strat.set_allocated_cash(cy_cash.cash)
+            else:
+                cy_strat.set_allocated_cash(portfolio.cash)
+
+        epa_strat = strategy_definitions.get("event-parity-arbitrage")
+        if epa_strat and hasattr(epa_strat, "set_allocated_cash"):
+            epa_cash = portfolio.strategy_states.get("event-parity-arbitrage")
+            if epa_cash:
+                epa_strat.set_allocated_cash(epa_cash.cash)
+            else:
+                epa_strat.set_allocated_cash(portfolio.cash)
 
         # 3. Maintain watchlist: newly discovered markets + any unsettled open positions
         still_open = [

@@ -144,7 +144,13 @@ class WeatherOracle:
             logger.debug("Failed to fetch NWS observation for %s: %s", st, exc)
             return None
 
-    def evaluate(self, ticker: str, side: str = "yes") -> OracleVerdict:
+    def evaluate(
+        self,
+        ticker: str,
+        side: str = "yes",
+        hours_to_close: Optional[float] = None,
+        required_margin: Optional[float] = None,
+    ) -> OracleVerdict:
         """Evaluate margin of safety for a Kalshi weather temperature contract."""
         station = resolve_station(ticker)
         strike = parse_strike_temperature(ticker)
@@ -172,9 +178,15 @@ class WeatherOracle:
 
         margin = obs.temp_f - strike
 
+        if required_margin is None:
+            if hours_to_close is not None:
+                required_margin = max(1.0, 0.8 + 0.5 * hours_to_close)
+            else:
+                required_margin = 2.0
+
         # For YES bets expecting temp > strike:
         if side.lower() in ("yes", "buy"):
-            if margin >= 2.0:
+            if margin >= required_margin:
                 return OracleVerdict(
                     station_id=station,
                     strike_temp_f=strike,
@@ -182,15 +194,6 @@ class WeatherOracle:
                     margin_f=round(margin, 2),
                     verdict="CONFIRMED_FAVORITE",
                     reason=f"Current temp ({obs.temp_f}°F) is +{margin:.2f}°F above strike ({strike}°F)",
-                )
-            elif -1.0 <= margin < 1.5:
-                return OracleVerdict(
-                    station_id=station,
-                    strike_temp_f=strike,
-                    current_temp_f=obs.temp_f,
-                    margin_f=round(margin, 2),
-                    verdict="MARGIN_TOO_CLOSE",
-                    reason=f"Current temp ({obs.temp_f}°F) is within high-variance buffer of strike ({strike}°F)",
                 )
             elif margin < -2.5:
                 return OracleVerdict(
@@ -207,8 +210,8 @@ class WeatherOracle:
                     strike_temp_f=strike,
                     current_temp_f=obs.temp_f,
                     margin_f=round(margin, 2),
-                    verdict="NEUTRAL",
-                    reason=f"Margin is {margin:.2f}°F",
+                    verdict="MARGIN_TOO_CLOSE",
+                    reason=f"Current temp ({obs.temp_f}°F) is within high-variance buffer of strike ({strike}°F) (required margin: {required_margin:.2f}°F)",
                 )
 
         return OracleVerdict(

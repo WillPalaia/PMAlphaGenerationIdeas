@@ -64,6 +64,9 @@ class MultiStrategy:
 
     def set_market_metadata(self, metadata: dict[str, Any]) -> None:
         self.market_metadata = metadata
+        for _, strategy in self.strategies:
+            if hasattr(strategy, "set_market_metadata"):
+                strategy.set_market_metadata(metadata)
 
     def set_strategy_basket(
         self,
@@ -217,26 +220,26 @@ class PaperPortfolio:
                 return False
             reject: str | None = None
             fill_qty = 0.0
-            fill_price: float | None = None
-            if snapshot.resolved:
-                reject = "market-resolved"
-            elif (intent.venue, intent.market_id) != (snapshot.venue, snapshot.market_id):
+            target_snap = snapshot if (intent.venue, intent.market_id) == (snapshot.venue, snapshot.market_id) else self._latest_snapshots.get((intent.venue, intent.market_id))
+            if target_snap is None:
                 reject = "snapshot-mismatch"
+            elif target_snap.resolved:
+                reject = "market-resolved"
             elif intent.side is Side.BUY:
-                if snapshot.yes_ask is None or intent.limit_price < snapshot.yes_ask:
+                if target_snap.yes_ask is None or intent.limit_price < target_snap.yes_ask:
                     reject = "limit-not-marketable"
                 else:
-                    fill_qty = min(intent.quantity, snapshot.ask_size)
-                    fill_price = snapshot.yes_ask
+                    fill_qty = min(intent.quantity, target_snap.ask_size)
+                    fill_price = target_snap.yes_ask
             else:
                 s_pos = strat_state.positions.get(key, PaperPosition())
-                if snapshot.yes_bid is None or intent.limit_price > snapshot.yes_bid:
+                if target_snap.yes_bid is None or intent.limit_price > target_snap.yes_bid:
                     reject = "limit-not-marketable"
                 elif s_pos.quantity <= 0:
                     reject = "inventory"
                 else:
-                    fill_qty = min(intent.quantity, snapshot.bid_size, s_pos.quantity)
-                    fill_price = snapshot.yes_bid
+                    fill_qty = min(intent.quantity, target_snap.bid_size, s_pos.quantity)
+                    fill_price = target_snap.yes_bid
             if reject is None and fill_qty <= 0:
                 reject = "no-liquidity"
             if reject is None and intent.side is Side.BUY:
@@ -315,6 +318,71 @@ class PaperPortfolio:
             )
             self._persist_equity(connection, snapshot.timestamp_ms, self._portfolio_value(snapshot))
             return True
+
+    def submit_bundle(self, intents: list[OrderIntent], snapshot: MarketSnapshot) -> list[bool]:
+        """Atomically validate and submit a multi-leg order bundle (e.g. Dutch book arbitrage).
+
+        Ensures all legs can be executed at or better than their limit prices
+        with sufficient top-of-book liquidity and available strategy cash.
+        If any leg cannot be filled, the entire bundle is rejected to prevent
+        unhedged orphan positions.
+        """
+        if not intents:
+            return []
+
+        strat = intents[0].strategy or intents[0].signal or "default"
+        strat_state = self.strategy_states.setdefault(strat, StrategyState(cash=float(self.starting_cash)))
+
+        total_cash_required = 0.0
+        plans: list[tuple[OrderIntent, MarketSnapshot, float, float]] = []
+
+        with self.store.connection() as connection:
+            for intent in intents:
+                existing = connection.execute(
+                    "SELECT 1 FROM paper_orders WHERE client_order_id = ?",
+                    (intent.client_order_id,),
+                ).fetchone()
+                if existing:
+                    return [False] * len(intents)
+
+                key = (intent.venue, intent.market_id)
+                target_snap = snapshot if (intent.venue, intent.market_id) == (snapshot.venue, snapshot.market_id) else self._latest_snapshots.get(key)
+                if target_snap is None or target_snap.resolved:
+                    return [False] * len(intents)
+
+                if intent.side is Side.BUY:
+                    if target_snap.yes_ask is None or intent.limit_price < target_snap.yes_ask:
+                        return [False] * len(intents)
+                    fill_qty = min(intent.quantity, target_snap.ask_size)
+                    fill_price = target_snap.yes_ask
+                    if fill_qty <= 0:
+                        return [False] * len(intents)
+                    s_pos = strat_state.positions.get(key, PaperPosition())
+                    if s_pos.quantity + fill_qty > self.max_inventory_per_market:
+                        return [False] * len(intents)
+                    total_cash_required += fill_qty * fill_price * (1 + self.fee_rate)
+                    plans.append((intent, target_snap, fill_qty, fill_price))
+                else:
+                    s_pos = strat_state.positions.get(key, PaperPosition())
+                    if target_snap.yes_bid is None or intent.limit_price > target_snap.yes_bid:
+                        return [False] * len(intents)
+                    if s_pos.quantity <= 0:
+                        return [False] * len(intents)
+                    fill_qty = min(intent.quantity, target_snap.bid_size, s_pos.quantity)
+                    fill_price = target_snap.yes_bid
+                    if fill_qty <= 0:
+                        return [False] * len(intents)
+                    plans.append((intent, target_snap, fill_qty, fill_price))
+
+            if total_cash_required > strat_state.cash:
+                return [False] * len(intents)
+
+        # All legs passed validation! Execute each leg
+        results: list[bool] = []
+        for intent, target_snap, _, _ in plans:
+            res = self.submit(intent, target_snap)
+            results.append(res)
+        return results
 
     def _settle(self, snapshot: MarketSnapshot) -> None:
         key = (snapshot.venue, snapshot.market_id)
@@ -472,22 +540,42 @@ class PaperRunner:
                     self.portfolio.process_snapshot(snapshot)
                 if snapshot.resolved:
                     self._market_exposure.pop((snapshot.venue, snapshot.market_id), None)
-                for intent in self.strategy.on_snapshot(snapshot):
-                    if not self._is_allowed(intent):
-                        logger.warning("Rejected paper intent %s by risk limits", intent.client_order_id)
+                intents = list(self.strategy.on_snapshot(snapshot))
+                if not intents:
+                    continue
+
+                # If all intents are part of a synchronized multi-leg arbitrage, submit atomically
+                if len(intents) > 1 and all(it.signal == "event-parity-arbitrage" for it in intents):
+                    allowed = [it for it in intents if self._is_allowed(it)]
+                    if len(allowed) != len(intents):
+                        logger.warning("Rejected multi-leg arbitrage bundle: risk limit violation on one or more legs")
                         continue
-                    key = (intent.venue, intent.market_id)
-                    notional = intent.quantity * intent.limit_price
-                    filled = False
                     if self.portfolio is not None:
-                        filled = self.portfolio.submit(intent, snapshot)
-                    if filled:
-                        if intent.side is Side.BUY:
-                            self._market_exposure[key] = self._market_exposure.get(key, 0.0) + notional
-                        else:
-                            self._market_exposure[key] = max(0.0, self._market_exposure.get(key, 0.0) - notional)
-                    if self.on_intent is not None and filled:
-                        await self.on_intent(intent)
+                        filled_list = self.portfolio.submit_bundle(intents, snapshot)
+                        for intent, filled in zip(intents, filled_list):
+                            if filled:
+                                key = (intent.venue, intent.market_id)
+                                notional = intent.quantity * intent.limit_price
+                                self._market_exposure[key] = self._market_exposure.get(key, 0.0) + notional
+                                if self.on_intent is not None:
+                                    await self.on_intent(intent)
+                else:
+                    for intent in intents:
+                        if not self._is_allowed(intent):
+                            logger.warning("Rejected paper intent %s by risk limits", intent.client_order_id)
+                            continue
+                        key = (intent.venue, intent.market_id)
+                        notional = intent.quantity * intent.limit_price
+                        filled = False
+                        if self.portfolio is not None:
+                            filled = self.portfolio.submit(intent, snapshot)
+                        if filled:
+                            if intent.side is Side.BUY:
+                                self._market_exposure[key] = self._market_exposure.get(key, 0.0) + notional
+                            else:
+                                self._market_exposure[key] = max(0.0, self._market_exposure.get(key, 0.0) - notional)
+                        if self.on_intent is not None and filled:
+                            await self.on_intent(intent)
             try:
                 await asyncio.wait_for(self._stop.wait(), self.config.poll_interval_seconds)
             except asyncio.TimeoutError:

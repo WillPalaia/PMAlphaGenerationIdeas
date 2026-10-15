@@ -746,5 +746,22 @@ Over multiple days of uninterrupted forward capture across 302 active Kalshi mar
   * Direct integration with the National Weather Service public API (`api.weather.gov/stations/{stationId}/observations/latest`), the exact underlying station network used by Kalshi's settlement source (Synoptic Data).
   * Evaluates real-time station temperature vs. contract strike threshold before order emission.
   * **Knife-Edge Protection (`MARGIN_TOO_CLOSE`):** Rejects entries when current temperature is within $\pm 1.0^\circ\text{F}$ of the strike, directly preventing the high-variance flips that caused the only 2 historical losses.
-  * **Nowcast Latency Verification:** Confirms directional thermodynamic consistency and prevents buying contracts where temperature has already drifted away from target.
+### 5. Multi-Outcome Event Parity Engine, Atomic Bundling, LoL Worlds & Dynamic Sizing (October 15, 2026):
+- **Event-Level Dutch Book Arbitrage (`EventParityArbitrageStrategy` in `src/pm_alpha/strategies.py`):**
+  * Replaces single-ticker complementary arbitrage with a full multi-outcome event parity engine across $N$-outcome partitions ($N \ge 2$).
+  * **Cumulative Strike Ladder Guardrail:** Enforces `mutually_exclusive == True` on the parent event. Protects against cumulative strike structures (e.g. Treasury yields, strike ladders, baseball hits) where multiple strikes settle YES simultaneously and sum of prices $> 3.00$.
+  * **Partition Exhaustiveness:** Enforces that all $N$ legs of a mutually exclusive partition are present in memory before computing synthetic bundles.
+  * **Executable Depth & Budget Constraints:** Requires $\min(\text{ask\_size}) \ge 1.0$ across all legs and enforces sub-portfolio allocated cash before emitting orders.
+- **Atomic Multi-Leg Bundle Execution (`PaperPortfolio.submit_bundle` in `src/pm_alpha/paper.py`):**
+  * Verifies depth, price caps, and cash across all legs simultaneously.
+  * Rejects the entire bundle if any leg fails, completely eliminating unhedged orphan inventory risk.
+- **Esports & League of Legends Worlds Ingestion Unblocking (`discovery.py`):**
+  * Deprioritizes 24/7 zero-liquidity virtual soccer/basketball simulators (`KXESOCCERGAME`, `KXEBASKETBALLGAME`).
+  * Explicitly prioritizes human esports tournaments (`KXLOLGAME`, `KXWORLDS`, `KXLEAGUE`, `KXESPORTS`).
+  * Live verification: `KXLOLGAME-26OCT151900KCC9` (Karmine Corp vs Cloud9) actively tracked with >93,000 volume and 75,000 contracts of top-of-book depth.
+  * Esports quota increased to 20% (up to 40 markets).
+- **Dynamic Quarter-Kelly Sizing & Time Scaling (`AtmosphericTemperatureHarvester`):**
+  * Dynamic Quarter-Kelly position sizing ($\min(10.0, \max(1.0, \lfloor (\text{cash} \times 0.10) / \text{price} \rfloor))$) replaces fixed 1-contract sizing.
+  * Time-to-close dynamic margin scaling: $\text{required\_margin} = \max(1.0, 0.8 + 0.5 \times \text{hours\_to\_close})$.
+- **Testing Status:** Test suite expanded from 65 to 83 tests (`tests/test_advanced_strategies.py`, `tests/test_paper_portfolio.py`, `tests/test_discovery.py`), all passing cleanly in 1.24s.
 

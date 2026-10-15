@@ -99,3 +99,51 @@ def test_isolated_strategy_sub_portfolios_cannot_cannibalize_inventory_or_cash(t
     intent_b_buy = OrderIntent(4, "kalshi", "m1", Side.BUY, 2, 0.50, "b-buy-1", strategy="strat-beta")
     assert portfolio.submit(intent_b_buy, snapshot) is True
     assert portfolio.strategy_states["strat-beta"].positions[("kalshi", "m1")].quantity == 2.0
+
+
+def test_submit_bundle_atomic_fill_and_orphan_protection(tmp_path):
+    store = SnapshotStore(tmp_path / "paper_bundle.sqlite")
+    portfolio = PaperPortfolio(store, starting_cash=100.0, fee_rate=0.01)
+
+    snap_a = MarketSnapshot(1000, "kalshi", "LEG-A", 0.40, 0.42, 10, 10)
+    snap_b = MarketSnapshot(1000, "kalshi", "LEG-B", 0.50, 0.52, 10, 10)
+    portfolio.process_snapshot(snap_a)
+    portfolio.process_snapshot(snap_b)
+
+    # 1. Successful atomic execution of both legs
+    intents = [
+        OrderIntent(1000, "kalshi", "LEG-A", Side.BUY, 1.0, 0.42, "bundle-1-A", signal="event-parity-arbitrage"),
+        OrderIntent(1000, "kalshi", "LEG-B", Side.BUY, 1.0, 0.52, "bundle-1-B", signal="event-parity-arbitrage"),
+    ]
+    results = portfolio.submit_bundle(intents, snap_b)
+    assert results == [True, True]
+    assert portfolio.positions[("kalshi", "LEG-A")].quantity == 1.0
+    assert portfolio.positions[("kalshi", "LEG-B")].quantity == 1.0
+
+    # 2. Price moved on Leg A: Leg A ask jumped to 0.45 > limit_price 0.42
+    # submit_bundle must reject BOTH legs to prevent orphan unhedged position!
+    snap_a_moved = MarketSnapshot(2000, "kalshi", "LEG-A", 0.43, 0.45, 10, 10)
+    portfolio.process_snapshot(snap_a_moved)
+
+    stale_intents = [
+        OrderIntent(2000, "kalshi", "LEG-A", Side.BUY, 1.0, 0.42, "bundle-2-A", signal="event-parity-arbitrage"),
+        OrderIntent(2000, "kalshi", "LEG-B", Side.BUY, 1.0, 0.52, "bundle-2-B", signal="event-parity-arbitrage"),
+    ]
+    fail_results = portfolio.submit_bundle(stale_intents, snap_b)
+    assert fail_results == [False, False]
+    # Verify no orphan order or inventory fill occurred!
+    assert portfolio.positions[("kalshi", "LEG-A")].quantity == 1.0
+    assert portfolio.positions[("kalshi", "LEG-B")].quantity == 1.0
+
+    # 3. Insufficient cash for bundle
+    poor_portfolio = PaperPortfolio(SnapshotStore(tmp_path / "poor.sqlite"), starting_cash=0.50, fee_rate=0.01)
+    poor_portfolio.process_snapshot(snap_a)
+    poor_portfolio.process_snapshot(snap_b)
+    # Total cost = 0.42 + 0.52 = 0.94 + fee > 0.50 cash
+    cash_intents = [
+        OrderIntent(1000, "kalshi", "LEG-A", Side.BUY, 1.0, 0.42, "poor-1-A", signal="event-parity-arbitrage"),
+        OrderIntent(1000, "kalshi", "LEG-B", Side.BUY, 1.0, 0.52, "poor-1-B", signal="event-parity-arbitrage"),
+    ]
+    cash_results = poor_portfolio.submit_bundle(cash_intents, snap_b)
+    assert cash_results == [False, False]
+    assert len(poor_portfolio.positions) == 0

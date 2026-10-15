@@ -21,7 +21,14 @@ from .market_making import (
 )
 from .discovery import DiscoveredMarket, KalshiMarketDiscovery
 from .report import MarketReport, inspect_database
-from .strategies import StableHighProbabilityStrategy
+from .strategies import (
+    BuyBelowThreshold,
+    MeanReversionStrategy,
+    MomentumStrategy,
+    StableHighProbabilityStrategy,
+    EventParityArbitrageStrategy,
+    AtmosphericTemperatureHarvester,
+)
 
 __all__ = [
     "BacktestResult",
@@ -60,4 +67,6 @@ __all__ = [
     "MarketReport",
     "inspect_database",
     "StableHighProbabilityStrategy",
+    "EventParityArbitrageStrategy",
+    "AtmosphericTemperatureHarvester",
 ]

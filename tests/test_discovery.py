@@ -121,3 +121,105 @@ def test_discovery_balanced_quotas_and_close_time():
     assert "KXNFL-0" in tickers
     assert "KXTEMP-0" in tickers
 
+
+def test_discovery_filters_virtual_esports_and_prioritizes_human_esports():
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    # Markets payload with virtual esports and real human esports
+    payload = {
+        "markets": [
+            # Virtual esports with zero volume
+            {
+                "ticker": "KXESOCCERGAME-26OCT15-MANCHEL",
+                "title": "Virtual eSoccer",
+                "market_type": "binary",
+                "volume_24h_fp": "0",
+                "liquidity_dollars": "0",
+                "open_interest_fp": "0",
+            },
+            {
+                "ticker": "KXEBASKETBALLGAME-26OCT15-LALBOS",
+                "title": "Virtual eBasketball",
+                "market_type": "binary",
+                "volume_24h_fp": "0",
+                "liquidity_dollars": "0",
+                "open_interest_fp": "0",
+            },
+            # Real human esports with active volume and open interest
+            {
+                "ticker": "KXLOLGAME-26OCT15BLGT1-BLG",
+                "title": "League of Legends Worlds: BLG vs T1",
+                "market_type": "binary",
+                "volume_24h_fp": "5000",
+                "liquidity_dollars": "2500",
+                "open_interest_fp": "1200",
+                "yes_bid_dollars": "0.42",
+                "yes_bid_size_fp": "10",
+                "yes_ask_dollars": "0.44",
+                "yes_ask_size_fp": "10",
+            },
+            {
+                "ticker": "KXCS2MAP-26SEP251015AIMINN-1-AIM",
+                "title": "CS2 Map 1: AIM vs INN",
+                "market_type": "binary",
+                "volume_24h_fp": "3000",
+                "liquidity_dollars": "1500",
+                "open_interest_fp": "800",
+                "yes_bid_dollars": "0.50",
+                "yes_bid_size_fp": "10",
+                "yes_ask_dollars": "0.52",
+                "yes_ask_size_fp": "10",
+            },
+        ]
+    }
+
+    with patch("pm_alpha.discovery.urlopen") as urlopen, patch(
+        "pm_alpha.discovery.json.load", return_value=payload
+    ):
+        urlopen.return_value = Response()
+        disc = KalshiMarketDiscovery()._discover(limit=10)
+
+    tickers = [m.ticker for m in disc]
+    # Virtual esports with 0 volume should be filtered out
+    assert "KXESOCCERGAME-26OCT15-MANCHEL" not in tickers
+    assert "KXEBASKETBALLGAME-26OCT15-LALBOS" not in tickers
+    # Real human esports should be selected
+    assert "KXLOLGAME-26OCT15BLGT1-BLG" in tickers
+    assert "KXCS2MAP-26SEP251015AIMINN-1-AIM" in tickers
+
+
+def test_discovery_esports_quota_twenty_percent():
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    # Create payload with ample candidates across categories
+    markets = []
+    # 20 weather
+    for i in range(20):
+        markets.append({"ticker": f"KXTEMP-{i}", "market_type": "binary", "volume": "100"})
+    # 20 esports (human esports)
+    for i in range(20):
+        markets.append({"ticker": f"KXLOLGAME-{i}", "market_type": "binary", "volume": "100", "open_interest": "50"})
+    # 20 macro
+    for i in range(20):
+        markets.append({"ticker": f"KXGOLD-{i}", "market_type": "binary", "volume": "100"})
+
+    with patch("pm_alpha.discovery.urlopen") as urlopen, patch(
+        "pm_alpha.discovery.json.load", return_value={"markets": markets}
+    ):
+        urlopen.return_value = Response()
+        # Discover with limit = 20 -> 20% esports quota = 4 markets
+        disc = KalshiMarketDiscovery()._discover(limit=20)
+
+    esports_selected = [m for m in disc if m.category == "esports"]
+    assert len(esports_selected) == 4  # 20 * 0.20 = 4 markets
+

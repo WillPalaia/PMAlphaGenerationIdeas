@@ -47,6 +47,7 @@ def classify_market(ticker: str, title: str = "") -> str:
     # 4. Esports
     if any(prefix.startswith(x) for x in [
         "KXCS2", "KXDOTA", "KXVALORANT", "KXLOL", "KXOVERWATCH", "KXROCKETLEAGUE",
+        "KXWORLDS", "KXLEAGUE", "KXESPORTS",
         "KXESOCCER", "KXEBASKETBALL",
     ]):
         return "esports"
@@ -60,6 +61,11 @@ def classify_market(ticker: str, title: str = "") -> str:
 
     # Secondary title-based heuristics
     lower_title = title.lower()
+    if any(kw in lower_title for kw in [
+        "league of legends", "lol worlds", "counter-strike", "cs2", "dota 2", "valorant", "esports",
+        "lck", "lpl", "lec", "lcs", "worlds 202",
+    ]):
+        return "esports"
     if any(kw in lower_title for kw in [
         "inflation", "cpi", "fed", "interest rate", "unemployment", "gdp",
         "gas price", "crude oil", "gold", "treasury", "recession",
@@ -90,6 +96,8 @@ class DiscoveredMarket:
     yes_ask: float | None = None
     bid_size: float = 0.0
     ask_size: float = 0.0
+    event_ticker: str = ""
+    mutually_exclusive: bool = False
 
 
 class KalshiMarketDiscovery:
@@ -149,6 +157,12 @@ class KalshiMarketDiscovery:
                     if len(markets_list) > 10:
                         continue
 
+                t_upper = ticker.upper()
+                # Filter out virtual 24/7 esports that crowd out real esports with zero liquidity
+                if any(t_upper.startswith(p) for p in ("KXESOCCER", "KXEBASKETBALL")):
+                    if volume == 0 or (liquidity == 0 and bid_size == 0 and ask_size == 0):
+                        continue
+
                 title = market.get("title", "")
                 close_time = market.get("close_time", "")
                 hours_to_close = 9999.0
@@ -158,6 +172,9 @@ class KalshiMarketDiscovery:
                         hours_to_close = max(0.0, (close_dt - now_utc).total_seconds() / 3600.0)
                     except Exception:
                         pass
+
+                event_ticker = market.get("event_ticker") or ""
+                mutually_exclusive = bool(market.get("mutually_exclusive") or market.get("event", {}).get("mutually_exclusive", False))
 
                 category = classify_market(ticker, title)
                 candidates.append(
@@ -174,6 +191,8 @@ class KalshiMarketDiscovery:
                         yes_ask=yes_ask,
                         bid_size=bid_size,
                         ask_size=ask_size,
+                        event_ticker=event_ticker,
+                        mutually_exclusive=mutually_exclusive,
                     )
                 )
 
@@ -194,22 +213,44 @@ class KalshiMarketDiscovery:
         for cand in candidates:
             by_cat[cand.category].append(cand)
 
+        HUMAN_ESPORTS_PREFIXES = (
+            "KXLOL", "KXLOLGAME", "KXCS2", "KXCS2GAME", "KXCS2MAP",
+            "KXDOTA", "KXVALORANT", "KXOVERWATCH", "KXROCKETLEAGUE",
+            "KXWORLDS", "KXLEAGUE", "KXESPORTS",
+        )
         for cat, items in by_cat.items():
-            items.sort(
-                key=lambda x: (
-                    1 if (0.05 < x.hours_to_close <= 48.0 and (x.volume > 0 or x.bid_size > 0 or x.ask_size > 0)) else 0,
-                    x.volume + x.liquidity_dollars + x.bid_size + x.ask_size,
-                    -x.hours_to_close if x.hours_to_close <= 48.0 else 0,
-                ),
-                reverse=True,
-            )
+            if cat == "esports":
+                items.sort(
+                    key=lambda x: (
+                        # Prioritize real human esports with volume > 0 and open interest
+                        3 if any(x.ticker.upper().startswith(p) for p in HUMAN_ESPORTS_PREFIXES) and x.volume > 0 and x.open_interest > 0
+                        else 2 if any(x.ticker.upper().startswith(p) for p in HUMAN_ESPORTS_PREFIXES) and x.volume > 0
+                        else 1 if any(x.ticker.upper().startswith(p) for p in HUMAN_ESPORTS_PREFIXES) and (x.bid_size > 0 or x.ask_size > 0 or x.liquidity_dollars > 0)
+                        else 0 if any(x.ticker.upper().startswith(p) for p in HUMAN_ESPORTS_PREFIXES)
+                        else -1,  # Deprioritize virtual esports
+                        1 if (0.05 < x.hours_to_close <= 48.0 and (x.volume > 0 or x.bid_size > 0 or x.ask_size > 0)) else 0,
+                        x.volume + x.open_interest + x.liquidity_dollars + x.bid_size + x.ask_size,
+                        -x.hours_to_close if x.hours_to_close <= 48.0 else 0,
+                    ),
+                    reverse=True,
+                )
+            else:
+                items.sort(
+                    key=lambda x: (
+                        1 if (0.05 < x.hours_to_close <= 48.0 and (x.volume > 0 or x.bid_size > 0 or x.ask_size > 0)) else 0,
+                        x.volume + x.liquidity_dollars + x.bid_size + x.ask_size,
+                        -x.hours_to_close if x.hours_to_close <= 48.0 else 0,
+                    ),
+                    reverse=True,
+                )
 
         # Allocate category quotas dynamically based on requested limit
+        # Increased esports quota to 20% (up to 40 markets on 200 market limit)
         quota_weights = {
-            "weather": 0.50,
-            "macro_finance": 0.30,
-            "sports": 0.10,
-            "esports": 0.04,
+            "weather": 0.40,
+            "macro_finance": 0.25,
+            "esports": 0.20,
+            "sports": 0.09,
             "politics": 0.03,
             "other": 0.03,
         }
@@ -224,10 +265,10 @@ class KalshiMarketDiscovery:
                     selected.append(item)
                     selected_tickers.add(item.ticker)
 
-        # Fill remaining slots with rollover priority (weather first, then macro, then others)
+        # Fill remaining slots with rollover priority (weather first, then macro, then esports, etc.)
         if len(selected) < limit:
             remaining: list[DiscoveredMarket] = []
-            for cat_name in ("weather", "macro_finance", "sports", "esports", "politics", "other"):
+            for cat_name in ("weather", "macro_finance", "esports", "sports", "politics", "other"):
                 for item in by_cat.get(cat_name, []):
                     if item.ticker not in selected_tickers:
                         remaining.append(item)

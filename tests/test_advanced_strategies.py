@@ -556,3 +556,261 @@ def test_atmospheric_temperature_harvester():
     assert orders[0].side == Side.BUY
     assert orders[0].signal == "atmospheric-determinism-entry"
     assert orders[0].limit_price == 0.93
+
+
+def test_event_parity_arbitrage_executes_on_lol_worlds():
+    from pm_alpha.strategies import EventParityArbitrageStrategy
+
+    strategy = EventParityArbitrageStrategy(min_edge=0.01, fee_rate=0.01, quantity=5.0)
+
+    # Leg 1: BLG wins game
+    snap_blg = MarketSnapshot(
+        timestamp_ms=1000,
+        venue="kalshi",
+        market_id="KXLOLGAME-26OCT15BLGT1-BLG",
+        yes_bid=0.40,
+        yes_ask=0.42,
+        bid_size=10.0,
+        ask_size=10.0,
+    )
+    orders = list(strategy.on_snapshot(snap_blg))
+    assert orders == []  # Only one leg observed so far
+
+    # Leg 2: T1 wins game (sum of asks = 0.42 + 0.52 = 0.94 < 1.00 - fees)
+    snap_t1 = MarketSnapshot(
+        timestamp_ms=1050,
+        venue="kalshi",
+        market_id="KXLOLGAME-26OCT15BLGT1-T1",
+        yes_bid=0.50,
+        yes_ask=0.52,
+        bid_size=15.0,
+        ask_size=8.0,
+    )
+    orders = list(strategy.on_snapshot(snap_t1))
+    assert len(orders) == 2
+    assert all(o.side == Side.BUY for o in orders)
+    assert all(o.signal == "event-parity-arbitrage" for o in orders)
+    assert all(o.strategy == "event-parity-arbitrage" for o in orders)
+
+    tickers = {o.market_id: o for o in orders}
+    assert "KXLOLGAME-26OCT15BLGT1-BLG" in tickers
+    assert "KXLOLGAME-26OCT15BLGT1-T1" in tickers
+    assert tickers["KXLOLGAME-26OCT15BLGT1-BLG"].limit_price == 0.42
+    assert tickers["KXLOLGAME-26OCT15BLGT1-T1"].limit_price == 0.52
+    # Executable quantity capped by strategy quantity (5.0) and min depth (8.0)
+    assert tickers["KXLOLGAME-26OCT15BLGT1-BLG"].quantity == 5.0
+    assert tickers["KXLOLGAME-26OCT15BLGT1-T1"].quantity == 5.0
+
+
+def test_event_parity_arbitrage_rejects_cumulative_ladder_trap():
+    from pm_alpha.strategies import EventParityArbitrageStrategy
+
+    strategy = EventParityArbitrageStrategy(min_edge=0.01, fee_rate=0.01)
+
+    # Treasury yield strike ladder (NOT mutually exclusive - multiple legs settle YES!)
+    snap1 = MarketSnapshot(
+        timestamp_ms=1000,
+        venue="kalshi",
+        market_id="KXTREASURY10Y-26OCT-T4.25",
+        yes_bid=0.35,
+        yes_ask=0.38,
+        bid_size=10.0,
+        ask_size=10.0,
+    )
+    snap2 = MarketSnapshot(
+        timestamp_ms=1050,
+        venue="kalshi",
+        market_id="KXTREASURY10Y-26OCT-T4.50",
+        yes_bid=0.35,
+        yes_ask=0.38,
+        bid_size=10.0,
+        ask_size=10.0,
+    )
+    list(strategy.on_snapshot(snap1))
+    orders = list(strategy.on_snapshot(snap2))
+    # Cumulative ladder trap must be detected and rejected
+    assert orders == []
+
+    # Temperature strike ladder (also cumulative)
+    snap_temp1 = MarketSnapshot(1000, "kalshi", "KXTEMPCHI-26OCT-T70.99", 0.40, 0.45, 10, 10)
+    snap_temp2 = MarketSnapshot(1050, "kalshi", "KXTEMPCHI-26OCT-T71.99", 0.40, 0.45, 10, 10)
+    list(strategy.on_snapshot(snap_temp1))
+    assert list(strategy.on_snapshot(snap_temp2)) == []
+
+
+def test_event_parity_arbitrage_prevents_partial_fill_legging_risk():
+    from pm_alpha.strategies import EventParityArbitrageStrategy
+
+    strategy = EventParityArbitrageStrategy(min_order_size=1.0)
+    # Leg 1 has ample liquidity
+    snap1 = MarketSnapshot(1000, "kalshi", "KXCS2MAP-26SEP25-AIM", 0.40, 0.42, 10.0, 10.0)
+    # Leg 2 has microscopic liquidity (0.4 contracts < min_order_size 1.0)
+    snap2 = MarketSnapshot(1050, "kalshi", "KXCS2MAP-26SEP25-INN", 0.50, 0.52, 10.0, 0.4)
+
+    list(strategy.on_snapshot(snap1))
+    orders = list(strategy.on_snapshot(snap2))
+    # Must reject to avoid partial-fill legging risk
+    assert orders == []
+
+
+def test_atmospheric_temperature_harvester_quarter_kelly_sizing():
+    from pm_alpha.strategies import AtmosphericTemperatureHarvester
+
+    # Initialize harvester with $100 cash
+    harvester = AtmosphericTemperatureHarvester(
+        min_price=0.88,
+        max_price=0.95,
+        allocated_cash=100.0,
+        max_contracts=50.0,
+        dynamic_sizing=True,
+    )
+    # At price 0.92, quarter-kelly fraction is ~0.21, clamped to max_cash_pct (0.10)
+    # Target dollars = $100 * 0.10 = $10.00 -> 10 contracts
+    qty_100 = harvester.calculate_sizing(0.92)
+    assert qty_100 == 10.0
+
+    # Compounding: Scale cash up to $500
+    harvester.set_allocated_cash(500.0)
+    # Target dollars = $500 * 0.10 = $50.00 -> 54 contracts, clamped to max_contracts (50.0)
+    qty_500 = harvester.calculate_sizing(0.92)
+    assert qty_500 == 50.0
+
+    # Small bankroll: $20 cash
+    harvester.set_allocated_cash(20.0)
+    # Target dollars = $20 * 0.10 = $2.00 -> 2 contracts
+    qty_20 = harvester.calculate_sizing(0.92)
+    assert qty_20 == 2.0
+
+
+def test_atmospheric_temperature_harvester_dynamic_time_scaling_margin():
+    from pm_alpha.strategies import AtmosphericTemperatureHarvester
+    from pm_alpha.weather_oracle import WeatherOracle, NwsObservation
+    from unittest.mock import patch
+
+    oracle = WeatherOracle()
+    # Mock observation: station is 73.2°F, strike is 71.0°F -> margin = +2.2°F
+    mock_obs = NwsObservation(
+        station_id="KLAX",
+        timestamp_iso="2026-10-15T05:00:00Z",
+        temp_f=73.2,
+        temp_c=22.89,
+        dewpoint_f=55.0,
+        wind_speed_mph=5.0,
+        description="Clear",
+        fetched_at_ms=1700000000000,
+    )
+
+    with patch.object(oracle, "get_latest_observation", return_value=mock_obs):
+        # Scenario A: 4 hours to close -> required_margin = max(1.0, 0.8 + 0.5 * 4.0) = 2.8°F
+        # Current margin is 2.2°F < 2.8°F -> MARGIN_TOO_CLOSE!
+        meta_4h = {"KXTEMPLAXHS-26OCT1502-T71.00": type("Meta", (), {"hours_to_close": 4.0})()}
+        harvester_4h = AtmosphericTemperatureHarvester(
+            lookback=2,
+            oracle=oracle,
+            market_metadata=meta_4h,
+        )
+        list(harvester_4h.on_snapshot(MarketSnapshot(1000, "kalshi", "KXTEMPLAXHS-26OCT1502-T71.00", 0.92, 0.93, 10, 10)))
+        orders_4h = list(harvester_4h.on_snapshot(MarketSnapshot(2000, "kalshi", "KXTEMPLAXHS-26OCT1502-T71.00", 0.92, 0.93, 10, 10)))
+        assert orders_4h == []
+
+        # Scenario B: 0.5 hours to close -> required_margin = max(1.0, 0.8 + 0.5 * 0.5) = 1.05°F
+        # Current margin is 2.2°F >= 1.05°F -> Safe! Generates order.
+        meta_05h = {"KXTEMPLAXHS-26OCT1502-T71.00": type("Meta", (), {"hours_to_close": 0.5})()}
+        harvester_05h = AtmosphericTemperatureHarvester(
+            lookback=2,
+            oracle=oracle,
+            market_metadata=meta_05h,
+        )
+        list(harvester_05h.on_snapshot(MarketSnapshot(1000, "kalshi", "KXTEMPLAXHS-26OCT1502-T71.00", 0.92, 0.93, 10, 10)))
+        orders_05h = list(harvester_05h.on_snapshot(MarketSnapshot(2000, "kalshi", "KXTEMPLAXHS-26OCT1502-T71.00", 0.92, 0.93, 10, 10)))
+        assert len(orders_05h) == 1
+        assert orders_05h[0].signal == "atmospheric-determinism-entry"
+
+
+def test_event_parity_arbitrage_defers_incomplete_3way_partition_until_all_legs_present():
+    from pm_alpha.strategies import EventParityArbitrageStrategy
+    from pm_alpha.discovery import DiscoveredMarket
+
+    # A 3-way soccer event with 3 mutually exclusive markets
+    meta = {
+        "KXSOCCERGAME-26OCT15-MAN": DiscoveredMarket(
+            ticker="KXSOCCERGAME-26OCT15-MAN", title="Man", close_time="", liquidity_dollars=100,
+            volume=100, open_interest=100, category="sports", event_ticker="KXSOCCERGAME-26OCT15", mutually_exclusive=True,
+        ),
+        "KXSOCCERGAME-26OCT15-CHEL": DiscoveredMarket(
+            ticker="KXSOCCERGAME-26OCT15-CHEL", title="Chel", close_time="", liquidity_dollars=100,
+            volume=100, open_interest=100, category="sports", event_ticker="KXSOCCERGAME-26OCT15", mutually_exclusive=True,
+        ),
+        "KXSOCCERGAME-26OCT15-DRAW": DiscoveredMarket(
+            ticker="KXSOCCERGAME-26OCT15-DRAW", title="Draw", close_time="", liquidity_dollars=100,
+            volume=100, open_interest=100, category="sports", event_ticker="KXSOCCERGAME-26OCT15", mutually_exclusive=True,
+        ),
+    }
+
+    strategy = EventParityArbitrageStrategy(min_edge=0.01, fee_rate=0.01, market_metadata=meta)
+
+    # Leg 1 arrives
+    snap1 = MarketSnapshot(1000, "kalshi", "KXSOCCERGAME-26OCT15-MAN", 0.30, 0.35, 10, 10)
+    assert list(strategy.on_snapshot(snap1)) == []
+
+    # Leg 2 arrives: Sum of asks is 0.35 + 0.35 = 0.70 < 1.00, BUT partition is NOT exhaustive (missing DRAW)!
+    # Must defer and NOT emit orders!
+    snap2 = MarketSnapshot(1050, "kalshi", "KXSOCCERGAME-26OCT15-CHEL", 0.30, 0.35, 10, 10)
+    assert list(strategy.on_snapshot(snap2)) == []
+
+    # Leg 3 arrives: All 3 legs now present! Total ask = 0.35 + 0.35 + 0.20 = 0.90 < 1.00 - fees.
+    # Now all legs are present, so Dutch book executes across all 3 legs!
+    snap3 = MarketSnapshot(1100, "kalshi", "KXSOCCERGAME-26OCT15-DRAW", 0.18, 0.20, 10, 10)
+    orders = list(strategy.on_snapshot(snap3))
+    assert len(orders) == 3
+    assert {o.market_id for o in orders} == {
+        "KXSOCCERGAME-26OCT15-MAN", "KXSOCCERGAME-26OCT15-CHEL", "KXSOCCERGAME-26OCT15-DRAW"
+    }
+
+
+def test_event_parity_arbitrage_budget_constraint():
+    from pm_alpha.strategies import EventParityArbitrageStrategy
+
+    # Basket cost per contract ~ 0.42 + 0.52 = 0.94 + fee = $0.9494
+    # Allocated cash is only $0.50 -> Cannot afford 1.0 contract!
+    strategy = EventParityArbitrageStrategy(
+        min_edge=0.01, fee_rate=0.01, quantity=1.0, min_order_size=1.0, allocated_cash=0.50
+    )
+    snap1 = MarketSnapshot(1000, "kalshi", "KXLOLGAME-26OCT15BLGT1-BLG", 0.40, 0.42, 10.0, 10.0)
+    snap2 = MarketSnapshot(1050, "kalshi", "KXLOLGAME-26OCT15BLGT1-T1", 0.50, 0.52, 10.0, 8.0)
+
+    list(strategy.on_snapshot(snap1))
+    orders = list(strategy.on_snapshot(snap2))
+    assert orders == []  # Rejected due to budget constraint
+
+
+def test_atmospheric_temperature_harvester_zero_cash_prevents_trading():
+    from pm_alpha.strategies import AtmosphericTemperatureHarvester
+
+    harvester = AtmosphericTemperatureHarvester(
+        min_price=0.88,
+        max_price=0.95,
+        allocated_cash=0.0,
+        dynamic_sizing=True,
+    )
+    assert harvester.calculate_sizing(0.92) == 0.0
+
+
+def test_atmospheric_temperature_harvester_dynamic_hours_with_timestamp():
+    from pm_alpha.strategies import AtmosphericTemperatureHarvester
+    from pm_alpha.discovery import DiscoveredMarket
+
+    meta = {
+        "KXTEMP-TEST": DiscoveredMarket(
+            ticker="KXTEMP-TEST", title="Test", close_time="2026-10-15T08:00:00Z",
+            liquidity_dollars=100, volume=100, open_interest=100,
+        )
+    }
+    harvester = AtmosphericTemperatureHarvester(market_metadata=meta)
+    # 2 hours before close: 2026-10-15T06:00:00Z in ms
+    t_2h_before_ms = 1792044000000  # matches 06:00 UTC
+    import datetime
+    ct = datetime.datetime.fromisoformat("2026-10-15T08:00:00+00:00")
+    t_ms = int((ct.timestamp() - 7200) * 1000)
+    hours = harvester.get_hours_to_close("KXTEMP-TEST", timestamp_ms=t_ms)
+    assert round(hours, 2) == 2.0
