@@ -27,9 +27,11 @@ def classify_market(ticker: str, title: str = "") -> str:
     ]):
         return "macro_finance"
 
-    # 2. Weather & Climate
+    # 2. Weather & Climate (All Cities, Rain, Temp, Snow, Wind, Hurricanes)
     if any(prefix.startswith(x) for x in [
         "KXTEMP", "KXRAIN", "KXSNOW", "KXHURRICANE", "KXWEATHER",
+        "KXLOWT", "KXHIGHT", "KXAVGT", "KXHIGH", "KXLOW", "KXWIND", "MICHTEMP",
+        "RAIN", "SNOW", "TEMP", "HURCAT",
     ]):
         return "weather"
 
@@ -63,7 +65,10 @@ def classify_market(ticker: str, title: str = "") -> str:
         "gas price", "crude oil", "gold", "treasury", "recession",
     ]):
         return "macro_finance"
-    if any(kw in lower_title for kw in ["temperature", "rainfall", "snowfall", "hurricane"]):
+    if any(kw in lower_title for kw in [
+        "temperature", "rainfall", "snowfall", "hurricane", "high temp", "low temp",
+        "temp in", "rain in", "snow in", "weather", "snowstorm", "rain daily",
+    ]):
         return "weather"
     if any(kw in lower_title for kw in ["wins match", "touchdown", "points", "goals", "runs"]):
         return "sports"
@@ -93,7 +98,7 @@ class KalshiMarketDiscovery:
     def __init__(
         self,
         base_url: str = "https://external-api.kalshi.com/trade-api/v2",
-        max_pages: int = 5,
+        max_pages: int = 8,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.max_pages = max_pages
@@ -201,12 +206,12 @@ class KalshiMarketDiscovery:
 
         # Allocate category quotas dynamically based on requested limit
         quota_weights = {
-            "weather": 0.45,
-            "macro_finance": 0.35,
+            "weather": 0.50,
+            "macro_finance": 0.30,
             "sports": 0.10,
-            "esports": 0.05,
+            "esports": 0.04,
             "politics": 0.03,
-            "other": 0.02,
+            "other": 0.03,
         }
 
         selected: list[DiscoveredMarket] = []
@@ -219,20 +224,13 @@ class KalshiMarketDiscovery:
                     selected.append(item)
                     selected_tickers.add(item.ticker)
 
-        # Fill remaining slots from any category by highest priority
+        # Fill remaining slots with rollover priority (weather first, then macro, then others)
         if len(selected) < limit:
             remaining: list[DiscoveredMarket] = []
-            for items in by_cat.values():
-                for item in items:
+            for cat_name in ("weather", "macro_finance", "sports", "esports", "politics", "other"):
+                for item in by_cat.get(cat_name, []):
                     if item.ticker not in selected_tickers:
                         remaining.append(item)
-            remaining.sort(
-                key=lambda x: (
-                    1 if (0.05 < x.hours_to_close <= 48.0 and (x.volume > 0 or x.bid_size > 0)) else 0,
-                    x.volume + x.liquidity_dollars + x.bid_size + x.ask_size,
-                ),
-                reverse=True,
-            )
             for item in remaining:
                 selected.append(item)
                 selected_tickers.add(item.ticker)

@@ -2379,6 +2379,7 @@ class AtmosphericTemperatureHarvester:
         max_orders_per_market: int = 1,
         prefix: str = "temp-harvest",
         strategy_name: str = "weather-determinism-yield",
+        oracle: Optional[Any] = None,
     ):
         self.min_price = min_price
         self.max_price = max_price
@@ -2390,6 +2391,7 @@ class AtmosphericTemperatureHarvester:
         self.max_orders_per_market = max_orders_per_market
         self.prefix = prefix
         self.strategy_name = strategy_name
+        self.oracle = oracle
 
         self._history: dict[tuple[str, str], list[float]] = {}
         self._positions: dict[tuple[str, str], float] = {}
@@ -2428,6 +2430,11 @@ class AtmosphericTemperatureHarvester:
             and self._orders.get(key, 0) < self.max_orders_per_market
             and key not in self._positions
         ):
+            if self.oracle is not None:
+                verdict = self.oracle.evaluate(snapshot.market_id, side="yes")
+                if verdict.verdict in ("MARGIN_TOO_CLOSE", "IMPOSSIBLE_TARGET"):
+                    return
+
             self._orders[key] = self._orders.get(key, 0) + 1
             self._positions[key] = price
             self._counter += 1

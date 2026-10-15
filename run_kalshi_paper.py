@@ -32,6 +32,7 @@ from pm_alpha.strategies import (
     MicrostructureRetailHerdFader,
     AtmosphericTemperatureHarvester,
 )
+from pm_alpha.weather_oracle import WeatherOracle
 
 
 async def main() -> None:
@@ -41,7 +42,7 @@ async def main() -> None:
     parser.add_argument("--interval", type=float, default=2.5)
     parser.add_argument("--discover", action="store_true")
     parser.add_argument("--discovery-interval", type=float, default=300.0)
-    parser.add_argument("--market-limit", type=int, default=140, help="Maximum number of active markets to discover")
+    parser.add_argument("--market-limit", type=int, default=200, help="Maximum number of active markets to discover")
     parser.add_argument("--starting-cash", type=float, default=100.0)
     parser.add_argument("--fee-rate", type=float, default=0.01)
     parser.add_argument("--reset-cash", action="store_true", help="Reset all strategy sub-portfolio cash to starting-cash")
@@ -121,11 +122,11 @@ async def main() -> None:
     mh_cfg = dyn_cfg.get("microstructure-herd-fader", {})
     ca_cfg = dyn_cfg.get("complement-arbitrage", {})
 
-    strategy_definitions = {
+    weather_oracle = WeatherOracle(cache_ttl_seconds=120.0)
 
-        # 2. Pure Hold-to-Maturity Favorite Harvester (Weather & Macro Determinism)
-        # NEVER sells early: zero stop-loss and zero take-profit. Holds 100% of contracts strictly to maturity.
-        # Targets high-certainty contracts with tight spread in bounded physical sectors.
+    strategy_definitions = {
+        # 1. Pure Hold-to-Maturity Favorite Harvester with Live NWS Oracle Validation
+        # Validated with NOAA ASOS ground-truth station observations to reject knife-edge margins.
         "conservative-yield": AtmosphericTemperatureHarvester(
             min_price=cy_cfg.get("min_price", 0.88),
             max_price=cy_cfg.get("max_price", 0.95),
@@ -136,6 +137,7 @@ async def main() -> None:
             quantity=1.0,
             prefix="conservative-yield",
             strategy_name="conservative-yield",
+            oracle=weather_oracle,
         ),
 
         # 2. Parity & Dutch Book Arbitrage (Risk-Free Structural Mispricing across All Markets)

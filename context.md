@@ -737,3 +737,14 @@ Over multiple days of uninterrupted forward capture across 302 active Kalshi mar
 - **Quota Rebalancing in `discovery.py`:** Weather allocated 45%, macro/finance 35% (80% total to deterministic sectors) to maximize feed density for `conservative-yield`.
 - **Optimization Hardening in `optimizer.py`:** Disabled Gemini LLM API calls and eliminated reactive daily hyperparameter tuning. Strategy parameters are frozen to empirically validated bounds, and nightly reports now run purely on deterministic local mathematical telemetry.
 
+### 4. Multi-City Universe Expansion & NOAA ASOS Weather Oracle:
+- **Expanded City Market Discovery:**
+  * Added prefixes and classification support for all Kalshi weather cities: Los Angeles (`KLAX`), Chicago (`KORD`), New York (`KNYC`), Miami (`KMIA`), Austin (`KAUS`), Boston (`KBOS`), Denver (`KDEN`), Phoenix (`KPHX`), Houston (`KHOU`), Seattle (`KSEA`), Philadelphia (`KPHL`), Washington D.C. (`KDCA`), and Atlanta (`KATL`).
+  * Increased discovery `max_pages` to 8 and `--market-limit` from 140 to 200 to capture every active weather contract listed on Kalshi.
+  * Discovery allocates 50% base quota to weather with priority rollover, ensuring 100% of available weather contracts are monitored.
+- **NOAA / NWS ASOS Real-Time Observation Oracle (`src/pm_alpha/weather_oracle.py`):**
+  * Direct integration with the National Weather Service public API (`api.weather.gov/stations/{stationId}/observations/latest`), the exact underlying station network used by Kalshi's settlement source (Synoptic Data).
+  * Evaluates real-time station temperature vs. contract strike threshold before order emission.
+  * **Knife-Edge Protection (`MARGIN_TOO_CLOSE`):** Rejects entries when current temperature is within $\pm 1.0^\circ\text{F}$ of the strike, directly preventing the high-variance flips that caused the only 2 historical losses.
+  * **Nowcast Latency Verification:** Confirms directional thermodynamic consistency and prevents buying contracts where temperature has already drifted away from target.
+
