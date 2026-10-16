@@ -814,3 +814,50 @@ def test_atmospheric_temperature_harvester_dynamic_hours_with_timestamp():
     t_ms = int((ct.timestamp() - 7200) * 1000)
     hours = harvester.get_hours_to_close("KXTEMP-TEST", timestamp_ms=t_ms)
     assert round(hours, 2) == 2.0
+
+
+def test_event_parity_arbitrage_rejects_spreads_and_ladders():
+    from pm_alpha.strategies import EventParityArbitrageStrategy
+
+    strategy = EventParityArbitrageStrategy(min_edge=0.01, fee_rate=0.01)
+
+    # 1. Goal spread line with trailing digits e.g. TOR4 and TOR5
+    snap_spread1 = MarketSnapshot(1000, "kalshi", "KXNHLSPREAD-26OCT15BUFTOR-TOR4", 0.10, 0.12, 10.0, 10.0)
+    snap_spread2 = MarketSnapshot(1050, "kalshi", "KXNHLSPREAD-26OCT15BUFTOR-TOR5", 0.05, 0.07, 10.0, 10.0)
+    assert not strategy.is_mutually_exclusive_partition("KXNHLSPREAD-26OCT15BUFTOR", [snap_spread1, snap_spread2])
+
+    list(strategy.on_snapshot(snap_spread1))
+    orders = list(strategy.on_snapshot(snap_spread2))
+    assert orders == []
+
+    # 2. Player prop rushing ladder
+    snap_ladder1 = MarketSnapshot(1100, "kalshi", "KXNFLLADDERRSHYDS-26OCT18BUFLV-BUFJALLEN17", 0.10, 0.13, 10.0, 10.0)
+    snap_ladder2 = MarketSnapshot(1150, "kalshi", "KXNFLLADDERRSHYDS-26OCT18BUFLV-BUFJCOOK4", 0.25, 0.27, 10.0, 10.0)
+    assert not strategy.is_mutually_exclusive_partition("KXNFLLADDERRSHYDS-26OCT18BUFLV", [snap_ladder1, snap_ladder2])
+
+    list(strategy.on_snapshot(snap_ladder1))
+    orders_ladder = list(strategy.on_snapshot(snap_ladder2))
+    assert orders_ladder == []
+
+
+def test_paper_config_supports_quarter_kelly_order_notional():
+    from pm_alpha.paper import PaperConfig, PaperRunner
+    from pm_alpha.models import OrderIntent, Side
+
+    cfg = PaperConfig()
+    assert cfg.max_order_notional >= 15.0
+
+    # 10 contracts @ $0.92 = $9.20 notional
+    intent = OrderIntent(
+        timestamp_ms=1000,
+        venue="kalshi",
+        market_id="KXTEMP-TEST",
+        side=Side.BUY,
+        quantity=10.0,
+        limit_price=0.92,
+        client_order_id="test-order",
+        signal="test",
+    )
+    runner = PaperRunner(None, None, None, cfg)
+    assert runner._is_allowed(intent)
+

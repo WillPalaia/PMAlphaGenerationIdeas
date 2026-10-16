@@ -491,8 +491,8 @@ class PaperPortfolio:
 @dataclass(frozen=True)
 class PaperConfig:
     poll_interval_seconds: float = 1.0
-    max_order_notional: float = 5.0
-    max_market_exposure: float = 25.0
+    max_order_notional: float = 15.0
+    max_market_exposure: float = 50.0
     max_daily_loss: float = 10.0
 
     def __post_init__(self) -> None:

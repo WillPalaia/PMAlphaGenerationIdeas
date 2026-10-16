@@ -263,7 +263,11 @@ async def main() -> None:
         source,
         strategy,
         store,
-        PaperConfig(poll_interval_seconds=args.interval),
+        PaperConfig(
+            poll_interval_seconds=args.interval,
+            max_order_notional=15.0,
+            max_market_exposure=50.0,
+        ),
         refresh=refresh,
         portfolio=portfolio,
     )

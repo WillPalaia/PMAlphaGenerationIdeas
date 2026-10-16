@@ -1471,18 +1471,27 @@ class EventParityArbitrageStrategy:
         market_ids = [leg.market_id for leg in legs]
         upper_event = event_id.upper()
 
-        # 1. Strict rejection of cumulative strike ladders / threshold markers
+        NON_PARTITION_KEYWORDS = (
+            "SPREAD", "LADDER", "PROP", "MARGIN", "OVER", "UNDER", "TOTAL", "HANDICAP",
+            "YDS", "YARDS", "TOUCHDOWN", "GOAL", "POINTS", "REBOUNDS", "ASSISTS",
+            "FIRST", "LAST", "SCORE", "HALF", "QUARTER", "PERIOD", "CORNER", "PENALTY",
+            "TREASURY", "YIELD", "FED", "SOFR", "INFLATION", "CPI", "GDP",
+            "TEMP", "HIGH", "LOW", "RAIN", "SNOW", "HURRICANE", "WIND", "GOLD", "WTI",
+        )
+
+        # Reject any event ticker containing non-partition keywords
+        if any(kw in upper_event for kw in NON_PARTITION_KEYWORDS):
+            return False
+
+        # 1. Strict rejection of cumulative strike ladders / threshold markers / spreads / props
         for m_id in market_ids:
             upper = m_id.upper()
             outcome = upper.rsplit("-", 1)[-1]
             # Reject decimal strikes (e.g. -T71.99, -4.25, -T4.25) or pure numeric strike targets
             if "." in outcome or outcome.isdigit() or re.search(r"-[TB]\d+\.\d+", upper):
                 return False
-            # Reject macro/finance ladders, yield curves, indices, weather thresholds
-            if any(p in upper for p in (
-                "TREASURY", "YIELD", "FED", "SOFR", "INFLATION", "CPI", "GDP",
-                "TEMP", "HIGH", "LOW", "RAIN", "SNOW", "HURRICANE", "WIND", "GOLD", "WTI"
-            )):
+            # Reject non-partition market tickers
+            if any(p in upper for p in NON_PARTITION_KEYWORDS):
                 return False
 
         # 2. Check metadata completeness and mutual exclusivity
@@ -1523,6 +1532,7 @@ class EventParityArbitrageStrategy:
             return False
 
         outcomes = [m_id.rsplit("-", 1)[-1].upper() for m_id in market_ids]
+
         # 2-way head-to-head match
         if len(legs) == 2:
             return outcomes[0] != outcomes[1] and all(len(o) >= 1 for o in outcomes)
